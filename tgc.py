@@ -5,12 +5,18 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
+from aiogram.client.default import DefaultBotProperties
 from config import API_ID, API_HASH, BOT_TOKEN, SUPPORT_USERNAME, REQUIRED_CHANNEL
 
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
+# ✅ Create bot with Aiogram 3.7+ compatible style
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN)
+)
 dp = Dispatcher()
 
 user_sessions = {}  # {user_id: {"client": TelegramClient, "limit": int, "logged_in": bool}}
+
 
 # ---------- Channel Join Check ----------
 async def is_user_joined(user_id):
@@ -26,8 +32,7 @@ async def require_channel_join(message: Message) -> bool:
     if not joined:
         join_link = f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}"
         await message.answer(
-            f"🔒 **Join Required**\n\nYou must join our channel before using this bot:\n👉 [Join Now]({join_link})\n\nAfter joining, press /start again.",
-            parse_mode="Markdown",
+            f"🔒 **Join Required**\n\nYou must join our channel before using this bot:\n👉 [Join Now]({join_link})\n\nAfter joining, press /start again."
         )
         return False
     return True
