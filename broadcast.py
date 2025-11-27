@@ -5,10 +5,11 @@ import logging
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
+from aiogram.filters import Command
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.types import Message
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -31,7 +32,7 @@ BOT_TOKEN = "8403745447:AAHZ_0XehvLxQdcrTjpjVQgu-4s8gmPRhAw"
 try:
     bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
     storage = MemoryStorage()
-    dp = Dispatcher(bot, storage=storage)
+    dp = Dispatcher(storage=storage)
     logger.info("Bot initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize bot: {e}")
@@ -185,8 +186,8 @@ def cleanup_login_session(user_id: int):
 # COMMAND HANDLERS
 # ========================
 
-@dp.message_handler(commands=["start", "help"])
-async def cmd_start(message: types.Message):
+@dp.message(Command("start", "help"))
+async def cmd_start(message: Message):
     text = (
         "🤖 <b>Telegram Auto-Message Bot</b>\n\n"
         "I can help you send automated messages to your Telegram groups.\n\n"
@@ -200,8 +201,8 @@ async def cmd_start(message: types.Message):
     )
     await message.reply(text)
 
-@dp.message_handler(commands=["status"])
-async def cmd_status(message: types.Message):
+@dp.message(Command("status"))
+async def cmd_status(message: Message):
     """Check user login status"""
     user_id = message.from_user.id
     
@@ -221,8 +222,8 @@ async def cmd_status(message: types.Message):
         await message.reply("❌ <b>Not logged in</b>\nUse /login to get started.")
 
 # ---------- /login (step 1) ----------
-@dp.message_handler(commands=["login"])
-async def cmd_login(message: types.Message, state: FSMContext):
+@dp.message(Command("login"))
+async def cmd_login(message: Message, state: FSMContext):
     # Check if already logged in
     cur.execute("SELECT is_logged_in FROM users WHERE tg_user_id=?", (message.from_user.id,))
     row = cur.fetchone()
@@ -235,10 +236,10 @@ async def cmd_login(message: types.Message, state: FSMContext):
         "First, send your <code>api_id</code>:\n\n"
         "<i>Get it from: https://my.telegram.org/apps</i>"
     )
-    await LoginStates.waiting_api_id.set()
+    await state.set_state(LoginStates.waiting_api_id)
 
-@dp.message_handler(state=LoginStates.waiting_api_id)
-async def process_api_id(message: types.Message, state: FSMContext):
+@dp.message(LoginStates.waiting_api_id)
+async def process_api_id(message: Message, state: FSMContext):
     try:
         api_id = int(message.text.strip())
         if api_id <= 0:
@@ -249,10 +250,10 @@ async def process_api_id(message: types.Message, state: FSMContext):
 
     await state.update_data(api_id=api_id)
     await message.reply("✅ api_id received.\nNow send your <code>api_hash</code>:")
-    await LoginStates.waiting_api_hash.set()
+    await state.set_state(LoginStates.waiting_api_hash)
 
-@dp.message_handler(state=LoginStates.waiting_api_hash)
-async def process_api_hash(message: types.Message, state: FSMContext):
+@dp.message(LoginStates.waiting_api_hash)
+async def process_api_hash(message: Message, state: FSMContext):
     api_hash = message.text.strip()
     if not api_hash or len(api_hash) < 10:
         await message.reply("❌ Invalid api_hash. Please send again:")
@@ -264,10 +265,10 @@ async def process_api_hash(message: types.Message, state: FSMContext):
         "Now send your phone number with country code:\n"
         "<i>Example: <code>+8801XXXXXXXXX</code></i>"
     )
-    await LoginStates.waiting_phone.set()
+    await state.set_state(LoginStates.waiting_phone)
 
-@dp.message_handler(state=LoginStates.waiting_phone)
-async def process_phone(message: types.Message, state: FSMContext):
+@dp.message(LoginStates.waiting_phone)
+async def process_phone(message: Message, state: FSMContext):
     phone = message.text.strip()
     data = await state.get_data()
     api_id = data["api_id"]
@@ -301,16 +302,16 @@ async def process_phone(message: types.Message, state: FSMContext):
     login_clients[message.from_user.id] = (client, phone, api_id, api_hash)
 
     await message.reply("📲 OTP sent to your Telegram account. Please send the code you received:")
-    await LoginStates.waiting_otp.set()
+    await state.set_state(LoginStates.waiting_otp)
 
-@dp.message_handler(state=LoginStates.waiting_otp)
-async def process_otp(message: types.Message, state: FSMContext):
+@dp.message(LoginStates.waiting_otp)
+async def process_otp(message: Message, state: FSMContext):
     code = message.text.strip().replace('-', '').replace(' ', '')
     user_id = message.from_user.id
 
     if user_id not in login_clients:
         await message.reply("❌ Login session expired. Please start again with /login.")
-        await state.finish()
+        await state.clear()
         return
 
     client, phone, api_id, api_hash = login_clients[user_id]
@@ -326,7 +327,7 @@ async def process_otp(message: types.Message, state: FSMContext):
             "🔐 Your account has <b>2FA (cloud password)</b> enabled.\n"
             "Please send your Telegram password:"
         )
-        await LoginStates.waiting_2fa.set()
+        await state.set_state(LoginStates.waiting_2fa)
         return
 
     except Exception as e:
@@ -334,7 +335,7 @@ async def process_otp(message: types.Message, state: FSMContext):
             f"❌ Login with OTP failed: <code>{e}</code>\n"
             "Please try /login again."
         )
-        await state.finish()
+        await state.clear()
         await client.disconnect()
         cleanup_login_session(user_id)
         return
@@ -364,19 +365,19 @@ async def process_otp(message: types.Message, state: FSMContext):
         "You can now use /send to message your groups."
     )
 
-    await state.finish()
+    await state.clear()
     await client.disconnect()
     cleanup_login_session(user_id)
 
 # ---------- 2FA password ----------
-@dp.message_handler(state=LoginStates.waiting_2fa)
-async def process_2fa_password(message: types.Message, state: FSMContext):
+@dp.message(LoginStates.waiting_2fa)
+async def process_2fa_password(message: Message, state: FSMContext):
     password = message.text.strip()
     user_id = message.from_user.id
 
     if user_id not in login_clients:
         await message.reply("❌ Login session expired. Please start again with /login.")
-        await state.finish()
+        await state.clear()
         return
 
     client, phone, api_id, api_hash = login_clients[user_id]
@@ -389,7 +390,7 @@ async def process_2fa_password(message: types.Message, state: FSMContext):
             f"❌ 2FA password incorrect or login failed: <code>{e}</code>\n"
             "Please try /login again."
         )
-        await state.finish()
+        await state.clear()
         await client.disconnect()
         cleanup_login_session(user_id)
         return
@@ -419,13 +420,13 @@ async def process_2fa_password(message: types.Message, state: FSMContext):
         "You can now use /send to message your groups."
     )
 
-    await state.finish()
+    await state.clear()
     await client.disconnect()
     cleanup_login_session(user_id)
 
 # ---------- /logout ----------
-@dp.message_handler(commands=["logout"])
-async def cmd_logout(message: types.Message):
+@dp.message(Command("logout"))
+async def cmd_logout(message: Message):
     user_id = message.from_user.id
 
     cur.execute("""
@@ -439,8 +440,8 @@ async def cmd_logout(message: types.Message):
     await message.reply("🚪 Your Telegram account has been <b>logged out</b> and session cleared.")
 
 # ---------- /send ----------
-@dp.message_handler(commands=["send"])
-async def cmd_send(message: types.Message):
+@dp.message(Command("send"))
+async def cmd_send(message: Message):
     user_id = message.from_user.id
 
     client = await get_user_client(user_id)
@@ -536,8 +537,8 @@ async def cmd_send(message: types.Message):
     await message.reply(summary)
 
 # ---------- /logs ----------
-@dp.message_handler(commands=["logs"])
-async def cmd_logs(message: types.Message):
+@dp.message(Command("logs"))
+async def cmd_logs(message: Message):
     user_id = message.from_user.id
 
     # Show last 15 logs for this user
@@ -583,7 +584,7 @@ async def cmd_logs(message: types.Message):
 # ERROR HANDLER
 # ========================
 
-@dp.errors_handler()
+@dp.errors()
 async def errors_handler(update, error):
     logger.error(f"Update {update} caused error: {error}")
     return True
@@ -592,33 +593,13 @@ async def errors_handler(update, error):
 # BOT STARTUP/SHUTDOWN
 # ========================
 
-async def on_startup(dp):
-    logger.info("Bot started successfully")
-    # Notify admin if needed
-    # await bot.send_message(chat_id=ADMIN_ID, text="🤖 Bot started!")
-
-async def on_shutdown(dp):
-    logger.info("Bot shutting down...")
-    # Clean up all login sessions
-    for user_id in list(login_clients.keys()):
-        cleanup_login_session(user_id)
-    # Close database connection
-    conn.close()
-    await bot.close()
-
-# ========================
-# RUN BOT
-# ========================
+async def main():
+    logger.info("Starting bot...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
-        logger.info("Starting bot...")
-        executor.start_polling(
-            dp,
-            skip_updates=True,
-            on_startup=on_startup,
-            on_shutdown=on_shutdown
-        )
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
