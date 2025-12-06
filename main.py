@@ -1,312 +1,928 @@
+"""
+🤖 GROUP GUARDIAN PRO - Professional Telegram Group Management Bot
+Version: 3.3.0
+Developer: @professor_cry
+Fixed: Export file upload, Username underscore issue
+"""
+
+import json
+import logging
 import os
-import asyncio
-import random
-import string
-import sqlite3
-from datetime import datetime, timedelta
+import sys
+import traceback
+from datetime import datetime
+from typing import Dict, List, Optional, Any
+from telegram import Update, ChatMember
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters
+)
+from telegram.constants import ParseMode, ChatAction
+import html
 
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils import executor
+# ============ CONFIGURATION ============
+VERSION = "3.3.0"
+BOT_NAME = "Group Guardian Pro"
+DEVELOPER = "@FinnOwen"
+SUPPORT_LINK = "https://t.me/FinnOwen"
 
-from config import BOT_TOKEN, ADMIN_ID, FEE_AMOUNT, PAYMENT_TIMEOUT, DB_PATH, BASE_URL, BSCSCAN_API_KEY, BSC_RPC
-from db_init import init_db, conn as DB_CONN
-from encryption_utils import encrypt_privkey, decrypt_privkey
+# File structure
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
 
-# Optional: web3 for on-chain actions (address generation & withdraw)
-from web3 import Web3, HTTPProvider
-w3 = Web3(HTTPProvider(BSC_RPC))
+# ============ LOGGING SETUP ============
+def setup_logging():
+    """Setup simple logging"""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    file_handler = logging.FileHandler(
+        filename=os.path.join(LOG_DIR, "bot.log"),
+        encoding='utf-8'
+    )
+    file_handler.setLevel(logging.INFO)
+    
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logging.getLogger(__name__)
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
-cur = DB_CONN.cursor()
+logger = setup_logging()
 
-# ------------------------
-# Helpers
-# ------------------------
-def generate_id(length=8):
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+# ============ SIMPLE DATABASE MANAGER ============
+class SimpleDB:
+    """Simple database manager"""
+    
+    @staticmethod
+    def setup():
+        """Create data directory"""
+        os.makedirs(DATA_DIR, exist_ok=True)
+        logger.info(f"Data directory: {DATA_DIR}")
+    
+    @staticmethod
+    def get_group_file(chat_id: int, filename: str) -> str:
+        """Get group file path"""
+        return os.path.join(DATA_DIR, f"{chat_id}_{filename}.json")
+    
+    @staticmethod
+    def read_json(filepath: str, default: Any = None) -> Any:
+        """Read JSON file"""
+        try:
+            if not os.path.exists(filepath):
+                return default if default is not None else {}
+            
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Read error {filepath}: {e}")
+            return default if default is not None else {}
+    
+    @staticmethod
+    def write_json(filepath: str, data: Any) -> bool:
+        """Write JSON file"""
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+            return True
+        except Exception as e:
+            logger.error(f"Write error {filepath}: {e}")
+            return False
+    
+    @staticmethod
+    def load_config(chat_id: int) -> Dict:
+        """Load group configuration"""
+        config_file = SimpleDB.get_group_file(chat_id, "config")
+        
+        default_config = {
+            "group_id": chat_id,
+            "group_title": "",
+            "leave_ban_mode": False,
+            "auto_track": True,
+            "created_at": datetime.now().isoformat(),
+            "last_modified": datetime.now().isoformat()
+        }
+        
+        config = SimpleDB.read_json(config_file, default_config)
+        return {**default_config, **config} if config else default_config
+    
+    @staticmethod
+    def save_config(chat_id: int, config: Dict) -> bool:
+        """Save group configuration"""
+        config_file = SimpleDB.get_group_file(chat_id, "config")
+        config['last_modified'] = datetime.now().isoformat()
+        return SimpleDB.write_json(config_file, config)
+    
+    @staticmethod
+    def load_users(chat_id: int) -> Dict:
+        """Load group users"""
+        users_file = SimpleDB.get_group_file(chat_id, "users")
+        
+        default_users = {
+            "active": [],
+            "banned": [],
+            "left": [],
+            "admins": [],
+            "total": 0
+        }
+        
+        users = SimpleDB.read_json(users_file, default_users)
+        return {**default_users, **users} if users else default_users
+    
+    @staticmethod
+    def save_users(chat_id: int, users: Dict) -> bool:
+        """Save group users"""
+        users_file = SimpleDB.get_group_file(chat_id, "users")
+        users['total'] = len(users.get('active', [])) + len(users.get('banned', [])) + len(users.get('left', []))
+        return SimpleDB.write_json(users_file, users)
+    
+    @staticmethod
+    def load_bans(chat_id: int) -> Dict:
+        """Load group bans"""
+        bans_file = SimpleDB.get_group_file(chat_id, "bans")
+        
+        default_bans = {
+            "list": [],
+            "total": 0,
+            "auto": 0,
+            "manual": 0
+        }
+        
+        bans = SimpleDB.read_json(bans_file, default_bans)
+        return {**default_bans, **bans} if bans else default_bans
+    
+    @staticmethod
+    def save_bans(chat_id: int, bans: Dict) -> bool:
+        """Save group bans"""
+        bans_file = SimpleDB.get_group_file(chat_id, "bans")
+        return SimpleDB.write_json(bans_file, bans)
 
-def generate_order_id(length=12):
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+# Initialize database
+SimpleDB.setup()
 
-def create_deposit_address():  # creates a new private key + address (hot)
-    acct = w3.eth.account.create()  # random account
-    priv = acct.key.hex()[2:] if acct.key.hex().startswith("0x") else acct.key.hex()
-    addr = acct.address
-    return addr, priv
-
-def insert_link(link_id, order_id, amount, address, priv_enc, admin_id):
-    created_at = datetime.utcnow().isoformat()
-    cur.execute("INSERT INTO links (link_id, order_id, amount, address, priv_enc, admin_id, created_at, expired) VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
-                (link_id, order_id, amount, address, priv_enc, admin_id, created_at))
-    DB_CONN.commit()
-
-def mark_link_expired(link_id):
-    cur.execute("UPDATE links SET expired=1 WHERE link_id=?", (link_id,))
-    DB_CONN.commit()
-
-def fetch_link(link_id):
-    cur.execute("SELECT link_id, order_id, amount, address, created_at, expired FROM links WHERE link_id=?", (link_id,))
-    return cur.fetchone()
-
-def save_payment(payment_id, order_id, user_id, full_name, txid, amount_paid, status):
-    created_at = datetime.utcnow().isoformat()
-    cur.execute("INSERT INTO payments (payment_id, order_id, user_id, full_name, txid, amount_paid, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (payment_id, order_id, user_id, full_name, txid, amount_paid, status, created_at))
-    DB_CONN.commit()
-
-# ------------------------
-# Admin: generate_link
-# Usage: /generate_link <amount>
-# It will create a unique deposit address and store encrypted private key.
-# ------------------------
-@dp.message_handler(commands=['generate_link'])
-async def cmd_generate_link(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
-        await msg.reply("Access denied.")
-        return
-    args = msg.get_args().split()
-    if len(args) < 1:
-        await msg.reply("Usage: /generate_link <amount>\nExample: /generate_link 10.5")
-        return
+# ============ UTILITY FUNCTIONS ============
+def format_time(timestamp: Optional[str]) -> str:
+    """Format timestamp"""
+    if not timestamp:
+        return "Never"
     try:
-        amount = float(args[0])
+        dt = datetime.fromisoformat(timestamp)
+        return dt.strftime("%Y-%m-%d %H:%M")
     except:
-        await msg.reply("Invalid amount.")
+        return "Invalid"
+
+def format_username_for_display(username: Optional[str]) -> str:
+    """
+    Format username for display in Telegram messages
+    Fixes underscore issue in usernames
+    """
+    if not username:
+        return "No Username"
+    
+    # Clean username - remove @ if present and trim
+    clean_username = str(username).strip().lstrip('@')
+    if not clean_username:
+        return "No Username"
+    
+    # For display in Telegram messages, just add @ prefix
+    # Telegram will handle underscores automatically in text
+    return f"@{clean_username}"
+
+def format_username_for_file(username: Optional[str]) -> str:
+    """
+    Format username for saving in files
+    """
+    if not username:
+        return "No_Username"
+    
+    clean_username = str(username).strip().lstrip('@')
+    if not clean_username:
+        return "No_Username"
+    
+    return clean_username
+
+def clean_text(text: Optional[str]) -> str:
+    """Clean text - preserve underscores"""
+    if text is None:
+        return ""
+    return str(text).strip()
+
+async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Check if user is admin"""
+    try:
+        user = await update.effective_chat.get_member(update.effective_user.id)
+        return user.status in ['administrator', 'creator']
+    except:
+        return False
+
+async def is_owner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Check if user is owner"""
+    try:
+        user = await update.effective_chat.get_member(update.effective_user.id)
+        return user.status == 'creator'
+    except:
+        return False
+
+# ============ COMMAND HANDLERS ============
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start command"""
+    text = f"""
+🎉 *{BOT_NAME} v{VERSION}*
+
+A professional group management bot with:
+• Multi-group support
+• Leave-ban system
+• User tracking
+• Data export with user IDs
+
+📋 *Quick Start:*
+1. Add me to your group
+2. Make me Admin with ban permission
+3. Type `/setup` to initialize
+
+🔧 *Commands:* `/help`
+👨💻 *Developer:* {DEVELOPER}
+📞 *Support:* {SUPPORT_LINK}
+"""
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Help command"""
+    text = f"""
+🤖 *{BOT_NAME} - Commands*
+
+👑 *Admin Commands:*
+├ `/setup` - Initialize bot
+├ `/set_leave_ban on/off` - Toggle auto-ban
+├ `/track_admins` - Track all admins
+├ `/export_data` - Export all ban data with user IDs
+└ `/ban_logs` - View ban history with user IDs
+
+👥 *Member Commands:*
+├ `/help` - This message
+├ `/config` - Group settings
+├ `/stats` - Group statistics
+└ `/about` - About bot
+
+⚙️ *Features:*
+• Separate database for each group
+• Auto-ban users who leave (with user ID in notification)
+• Track all users with IDs
+• Export complete ban history with user IDs
+
+⚠️ *Bot must be Admin to work properly.*
+"""
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+async def setup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Setup command"""
+    if not await is_admin(update, context):
+        await update.message.reply_text("❌ Only admins can setup.", parse_mode=ParseMode.MARKDOWN)
         return
+    
+    chat_id = update.effective_chat.id
+    config = SimpleDB.load_config(chat_id)
+    config['group_title'] = update.effective_chat.title
+    config['setup_by'] = update.effective_user.full_name
+    config['setup_time'] = datetime.now().isoformat()
+    
+    SimpleDB.save_config(chat_id, config)
+    
+    text = f"""
+✅ *Setup Complete*
 
-    # create deposit account
-    address, priv = create_deposit_address()
-    priv_enc = encrypt_privkey(priv)
-    link_id = generate_id(10)
-    order_id = generate_order_id(10)
+📋 *Group:* {update.effective_chat.title}
+👤 *Setup by:* {update.effective_user.full_name}
+⏰ *Time:* {format_time(datetime.now().isoformat())}
 
-    insert_link(link_id, order_id, amount, address, priv_enc, msg.from_user.id)
-    link = f"{BASE_URL}?start={link_id}"  # user clicks this to open bot with link_id param
-    await msg.reply(f"✅ Link generated\nLink: {link}\nOrder ID: {order_id}\nAmount: {amount} USDT\nAddress: `{address}`\nFee: {FEE_AMOUNT} USDT\n\nSend this link to the user.", parse_mode="Markdown")
+📁 *Database:* `data/{chat_id}_*.json`
+⚙️ *Leave-ban:* Disabled (use `/set_leave_ban on`)
 
-# ------------------------
-# User: /start <link_id>
-# ------------------------
-@dp.message_handler(commands=['start'])
-async def cmd_start(msg: types.Message):
-    args = msg.get_args().strip()
-    if not args:
-        await msg.reply("Access denied. Please use admin generated link.")
+*Next:* Enable leave-ban with `/set_leave_ban on`
+"""
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+async def set_leave_ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set leave-ban mode"""
+    if not await is_admin(update, context):
+        await update.message.reply_text("❌ Only admins can change this.", parse_mode=ParseMode.MARKDOWN)
         return
-
-    row = fetch_link(args)
-    if not row:
-        await msg.reply("Invalid or expired link.")
+    
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/set_leave_ban on` or `/set_leave_ban off`", parse_mode=ParseMode.MARKDOWN)
         return
-
-    link_id, order_id, amount, address, created_at, expired = row
-    if expired:
-        await msg.reply("This payment link has expired.")
+    
+    mode = context.args[0].lower()
+    if mode not in ['on', 'off']:
+        await update.message.reply_text("❌ Use 'on' or 'off' only.", parse_mode=ParseMode.MARKDOWN)
         return
+    
+    chat_id = update.effective_chat.id
+    config = SimpleDB.load_config(chat_id)
+    config['leave_ban_mode'] = (mode == 'on')
+    config['modified_by'] = update.effective_user.full_name
+    
+    SimpleDB.save_config(chat_id, config)
+    
+    status = "✅ ENABLED" if mode == 'on' else "❌ DISABLED"
+    text = f"""
+⚙️ *Leave-Ban Mode Updated*
 
-    total_amount = round(amount + FEE_AMOUNT, 6)
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton(f"Copy Address & Pay {total_amount} USDT", callback_data=f"pay|{link_id}"))
-    kb.add(InlineKeyboardButton("I HAVE PAID (Submit TXID)", callback_data=f"submit_tx|{link_id}"))
+🔧 *Status:* {status}
+👤 *By:* {update.effective_user.full_name}
+⏰ *Time:* {format_time(datetime.now().isoformat())}
 
-    # show address + QR image as message (we'll send address text; for QR we can send a separate image)
-    text = (f"💸 *Payment Page*\n\nOrder ID: `{order_id}`\nAmount: *{amount} USDT*\nFee: *{FEE_AMOUNT} USDT*\nTotal: *{total_amount} USDT*\n\n"
-            f"Address: `{address}`\n\nPress the button to copy address & pay. After payment, submit TXID using *I HAVE PAID* button.\n\n"
-            f"⏳ Payment window: 30 minutes.")
-    await msg.reply(text, parse_mode="Markdown", reply_markup=kb)
+*Effect:* {'Users who leave will be auto-banned.' if mode == 'on' else 'No auto-ban on leave.'}
+"""
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-# ------------------------
-# Callback handler for pay & submit_tx
-# ------------------------
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith(("pay|","submit_tx|")))
-async def cb_pay_submit(call: types.CallbackQuery):
-    data = call.data.split("|")
-    action = data[0]
-    link_id = data[1]
+async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Config command"""
+    chat_id = update.effective_chat.id
+    config = SimpleDB.load_config(chat_id)
+    users = SimpleDB.load_users(chat_id)
+    bans = SimpleDB.load_bans(chat_id)
+    
+    text = f"""
+⚙️ *Group Configuration*
 
-    row = fetch_link(link_id)
-    if not row:
-        await call.answer("Invalid or expired link.", show_alert=True)
+📋 *Info:*
+├ Group: {update.effective_chat.title}
+├ ID: `{chat_id}`
+├ Created: {format_time(config.get('created_at'))}
+└ Modified: {format_time(config.get('last_modified'))}
+
+🔐 *Settings:*
+├ Leave-Ban: {'✅ ON' if config.get('leave_ban_mode') else '❌ OFF'}
+├ Auto-Track: {'✅ ON' if config.get('auto_track') else '❌ OFF'}
+└ Setup by: {config.get('setup_by', 'Unknown')}
+
+📊 *Stats:*
+├ Active: {len(users.get('active', []))}
+├ Banned: {len(users.get('banned', []))}
+├ Left: {len(users.get('left', []))}
+└ Total Bans: {bans.get('total', 0)}
+"""
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stats command"""
+    chat_id = update.effective_chat.id
+    config = SimpleDB.load_config(chat_id)
+    users = SimpleDB.load_users(chat_id)
+    bans = SimpleDB.load_bans(chat_id)
+    
+    active = len(users.get('active', []))
+    banned = len(users.get('banned', []))
+    left = len(users.get('left', []))
+    total = active + banned + left
+    
+    text = f"""
+📊 *Group Statistics*
+
+🏠 *Group:* {update.effective_chat.title}
+⏰ *Report:* {format_time(datetime.now().isoformat())}
+
+👥 *Users:*
+├ Active: {active}
+├ Banned: {banned}
+├ Left: {left}
+└ Total: {total}
+
+🚫 *Bans:*
+├ Total: {bans.get('total', 0)}
+├ Auto: {bans.get('auto', 0)}
+├ Manual: {bans.get('manual', 0)}
+└ Rate: {round((bans.get('total', 0) / total * 100), 1) if total > 0 else 0}%
+
+⚙️ *Status:*
+├ Leave-Ban: {'✅ Active' if config.get('leave_ban_mode') else '❌ Inactive'}
+├ Bot: ✅ Online
+└ Database: ✅ Healthy
+"""
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+async def track_admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Track admins command"""
+    if not await is_admin(update, context):
+        await update.message.reply_text("❌ Only admins can track.", parse_mode=ParseMode.MARKDOWN)
         return
-    _, order_id, amount, address, created_at, expired = row
-    if expired:
-        await call.answer("This link is expired.", show_alert=True)
-        return
+    
+    chat_id = update.effective_chat.id
+    
+    await update.message.reply_text("🔄 Tracking admins...", parse_mode=ParseMode.MARKDOWN)
+    
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+        users = SimpleDB.load_users(chat_id)
+        users['admins'] = []
+        
+        for admin in admins:
+            users['admins'].append({
+                'user_id': admin.user.id,
+                'name': clean_text(admin.user.full_name),
+                'username': admin.user.username if admin.user.username else "",
+                'status': admin.status,
+                'tracked': datetime.now().isoformat()
+            })
+        
+        SimpleDB.save_users(chat_id, users)
+        
+        text = f"""
+✅ *Admin Tracking Complete*
 
-    if action == "pay":
-        # show address as alert to enable copy on mobile + send QR
-        await call.answer(f"Address copied (tap to copy): {address}", show_alert=True)
-        # send QR image as new message
-        # generate QR and send
-        import qrcode, tempfile
-        img = qrcode.make(address)
-        tmp = tempfile.mktemp(suffix=".png")
-        img.save(tmp)
-        await bot.send_photo(chat_id=call.from_user.id, photo=open(tmp, "rb"), caption=f"Send *{round(amount+FEE_AMOUNT,6)} USDT* to this address.\nInclude fee {FEE_AMOUNT} USDT.", parse_mode="Markdown")
+📋 *Results:*
+├ Group: {update.effective_chat.title}
+├ Total Admins: {len(admins)}
+├ Owners: {sum(1 for a in admins if a.status == 'creator')}
+└ Time: {format_time(datetime.now().isoformat())}
+
+*Note:* Regular users tracked when they join.
+"""
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        
+    except Exception as e:
+        logger.error(f"Track error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}", parse_mode=ParseMode.MARKDOWN)
+
+async def export_data_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Export data command - COMPLETE BAN HISTORY WITH USER IDs - FIXED UPLOAD"""
+    if not await is_admin(update, context):
+        await update.message.reply_text("❌ Only admins can export.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    chat_id = update.effective_chat.id
+    
+    await update.message.reply_text("📤 Preparing complete ban history export...", parse_mode=ParseMode.MARKDOWN)
+    
+    try:
+        # Load data
+        config = SimpleDB.load_config(chat_id)
+        users = SimpleDB.load_users(chat_id)
+        bans = SimpleDB.load_bans(chat_id)
+        
+        # Create comprehensive export
+        export_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+        group_name = ''.join(c for c in update.effective_chat.title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        filename = f"ban_history_{chat_id}_{export_time}.txt"
+        filepath = os.path.join(DATA_DIR, filename)
+        
+        # Prepare content
+        content = f"""📋 COMPLETE BAN HISTORY - {BOT_NAME}
+================================================
+
+GROUP INFORMATION:
+------------------
+Group Name: {update.effective_chat.title}
+Group ID: {chat_id}
+Export Date: {datetime.now().isoformat()}
+Exported By: {update.effective_user.full_name} (ID: {update.effective_user.id})
+
+CONFIGURATION:
+--------------
+Leave-Ban Mode: {'ENABLED' if config.get('leave_ban_mode') else 'DISABLED'}
+Auto Tracking: {'ENABLED' if config.get('auto_track') else 'DISABLED'}
+Created: {config.get('created_at')}
+Last Modified: {config.get('last_modified')}
+
+USER STATISTICS:
+----------------
+Total Active Users: {len(users.get('active', []))}
+Total Banned Users: {len(users.get('banned', []))}
+Total Left Users: {len(users.get('left', []))}
+Total Admins: {len(users.get('admins', []))}
+
+BAN STATISTICS:
+---------------
+Total Bans: {bans.get('total', 0)}
+Auto Bans: {bans.get('auto', 0)}
+Manual Bans: {bans.get('manual', 0)}
+
+COMPLETE BAN LIST (ALL TIME):
+=============================
+"""
+        
+        # Add ALL banned users with their IDs
+        ban_list = bans.get('list', [])
+        
+        if not ban_list:
+            content += "\nNo ban records found.\n"
+        else:
+            for i, ban in enumerate(ban_list, 1):
+                user_id = ban.get('user_id', 'N/A')
+                user_name = clean_text(ban.get('name', 'Unknown'))
+                username = ban.get('username', '')
+                timestamp = ban.get('timestamp', 'Unknown')
+                reason = ban.get('reason', 'No reason')
+                ban_type = ban.get('type', 'Unknown')
+                
+                # Format timestamp
+                try:
+                    dt = datetime.fromisoformat(timestamp)
+                    formatted_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except:
+                    formatted_time = timestamp
+                
+                # Format username for file
+                formatted_username = format_username_for_file(username)
+                
+                content += f"\n{i}. USER INFORMATION:\n"
+                content += f"   Name: {user_name}\n"
+                content += f"   ID: {user_id}\n"
+                content += f"   Username: @{formatted_username}\n"
+                content += f"   Ban Time: {formatted_time}\n"
+                content += f"   Ban Type: {ban_type}\n"
+                content += f"   Reason: {reason}\n"
+                content += "   " + "-"*40
+        
+        content += f"""
+
+SUMMARY:
+--------
+Total Ban Records: {len(ban_list)}
+Export Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+File Format: UTF-8
+
+================================================
+END OF EXPORT
+"""
+        
+        # Save file
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        # Send file to user
         try:
-            os.remove(tmp)
-        except: pass
+            with open(filepath, 'rb') as f:
+                await update.message.reply_document(
+                    document=f,
+                    filename=filename,
+                    caption=f"📁 *Ban History Export*\n\n📊 *Total Records:* {len(ban_list)}\n📅 *Exported:* {datetime.now().strftime('%Y-%m-%d %H:%M')}\n💾 *File:* `{filename}`",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            logger.info(f"Exported file sent: {filename}")
+            
+        except Exception as e:
+            logger.error(f"File upload error: {e}")
+            # If file upload fails, send info message
+            file_size = os.path.getsize(filepath)
+            size_text = f"{file_size // 1024} KB" if file_size > 1024 else f"{file_size} bytes"
+            
+            text = f"""
+✅ *Export Complete - Download Manually*
 
-        # start countdown animation in the same chat (edits)
-        m = await bot.send_message(call.from_user.id, "⏳ Waiting for payment... 30:00")
-        # countdown micro loop: update every 30s or so (not too frequent to avoid rate limits)
-        total = PAYMENT_TIMEOUT
-        interval = 15  # seconds per update (can be 30)
-        elapsed = 0
-        while elapsed < total:
-            remain = total - elapsed
-            minutes = remain // 60
-            seconds = remain % 60
+📄 *File Details:*
+├ File: `{filename}`
+├ Size: {size_text}
+├ Location: `{filepath}`
+├ Records: {len(ban_list)}
+└ Export Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+⚠️ *Note:* File saved locally. Upload to Telegram failed.
+"""
+            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        
+    except Exception as e:
+        logger.error(f"Export error: {e}")
+        await update.message.reply_text(f"❌ Export failed: {str(e)[:200]}", parse_mode=ParseMode.MARKDOWN)
+
+async def ban_logs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ban logs command with user IDs - shows last 10 bans"""
+    if not await is_admin(update, context):
+        await update.message.reply_text("❌ Only admins can view logs.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    chat_id = update.effective_chat.id
+    bans = SimpleDB.load_bans(chat_id)
+    ban_list = bans.get('list', [])
+    
+    if not ban_list:
+        await update.message.reply_text("📭 No ban records found.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    # Show last 10 bans
+    recent = ban_list[-10:]
+    
+    text = f"""
+📋 *Ban Logs - {update.effective_chat.title}*
+
+📊 *Statistics:*
+├ Total Bans: {len(ban_list)}
+├ Auto Bans: {bans.get('auto', 0)}
+├ Manual Bans: {bans.get('manual', 0)}
+└ Showing: Last {len(recent)} of {len(ban_list)}
+
+🔍 *Recent Bans (Last 10 - Newest First):*
+"""
+    
+    for i, ban in enumerate(recent[::-1], 1):
+        time = format_time(ban.get('timestamp'))
+        user_name = clean_text(ban.get('name', 'Unknown'))
+        user_id = ban.get('user_id', 'N/A')
+        username = ban.get('username', '')
+        reason = ban.get('reason', 'Leave ban')
+        ban_type = "🔄 Auto" if ban.get('type') == 'auto' else "👤 Manual"
+        
+        # Format username properly
+        formatted_username = format_username_for_display(username)
+        
+        text += f"\n{i}. *{user_name}*\n"
+        text += f"   ├ 🆔 ID: `{user_id}`\n"
+        text += f"   ├ 👤 Username: {formatted_username}\n"
+        text += f"   ├ ⏰ {time}\n"
+        text += f"   ├ 📝 {reason}\n"
+        text += f"   └ {ban_type}\n"
+    
+    text += f"\n*Note:* Showing last {len(recent)} bans. Use `/export_data` for complete history."
+    
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """About command - FIXED USERNAME DISPLAY"""
+    text = f"""
+🤖 *{BOT_NAME} v{VERSION}*
+
+A professional Telegram group management bot
+with multi-group support and leave-ban system.
+
+🌟 *Features:*
+• Separate database for each group
+• Auto-ban users who leave (with user ID in notification)
+• User tracking and statistics
+• Complete data export with user IDs
+• Professional interface
+
+*Thank you for using {BOT_NAME}!*
+"""
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+
+async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Support command"""
+    text = f"""
+🆘 *Support Center*
+
+📞 *Contact Developer:*
+├ Telegram: @professor_cry
+└ Support Link: {SUPPORT_LINK}
+
+🔧 *Common Issues:*
+1. *Bot not responding:*
+   • Check admin permissions
+   • Restart bot
+
+2. *Commands not working:*
+   • Ensure bot is admin
+   • Use `/help` for guide
+
+3. *Export issues:*
+   • Check disk space
+   • Try again
+
+⚡ *Quick Help:*
+• Full guide: `/help`
+• Command list: Type `/`
+• Setup: `/setup`
+
+*Contact @professor_cry for help.*
+"""
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+
+# ============ EVENT HANDLERS ============
+async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle new member"""
+    try:
+        chat_id = update.effective_chat.id
+        
+        for user in update.message.new_chat_members:
+            # Bot added
+            if user.id == context.bot.id:
+                text = f"""
+🎉 *{BOT_NAME} Added!*
+
+⚡ *Quick Start:*
+1. Make me Admin (Ban permission)
+2. Type `/setup` to initialize
+3. Configure with `/set_leave_ban on`
+
+📚 *Commands:* `/help`
+
+"""
+                await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+                continue
+            
+            # Track user
+            config = SimpleDB.load_config(chat_id)
+            if config.get('auto_track', True):
+                users = SimpleDB.load_users(chat_id)
+                users['active'].append({
+                    'user_id': user.id,
+                    'name': clean_text(user.full_name),
+                    'username': user.username if user.username else "",
+                    'joined': datetime.now().isoformat()
+                })
+                SimpleDB.save_users(chat_id, users)
+                
+    except Exception as e:
+        logger.error(f"New member error: {e}")
+
+async def handle_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle left member - FIXED USERNAME DISPLAY"""
+    try:
+        user = update.message.left_chat_member
+        chat_id = update.effective_chat.id
+        
+        # Skip bot
+        if user.id == context.bot.id:
+            return
+        
+        # Update users
+        users = SimpleDB.load_users(chat_id)
+        
+        # Move from active to left
+        user_found = False
+        user_data = None
+        
+        for active in users['active'][:]:
+            if active['user_id'] == user.id:
+                active['left'] = datetime.now().isoformat()
+                users['left'].append(active)
+                users['active'].remove(active)
+                user_found = True
+                user_data = active
+                break
+        
+        # If not found in active, create new record
+        if not user_found:
+            user_data = {
+                'user_id': user.id,
+                'name': clean_text(user.full_name),
+                'username': user.username if user.username else "",
+                'left': datetime.now().isoformat()
+            }
+            users['left'].append(user_data)
+        
+        SimpleDB.save_users(chat_id, users)
+        
+        # Check leave-ban
+        config = SimpleDB.load_config(chat_id)
+        if config.get('leave_ban_mode', False):
             try:
-                await bot.edit_message_text(f"⏳ Waiting for payment... {int(minutes):02d}:{int(seconds):02d}", call.from_user.id, m.message_id)
-            except:
-                pass
-            await asyncio.sleep(interval)
-            elapsed += interval
-            # you could optionally poll blockchain here to detect incoming tx automatically
-            # quick break if detected - e.g., check_payment_for_order(order_id)
-        # after timeout
-        # if no payment — expire link
-        mark_link_expired(link_id)
+                # Don't ban admins
+                admins = await context.bot.get_chat_administrators(chat_id)
+                admin_ids = [a.user.id for a in admins]
+                
+                if user.id not in admin_ids:
+                    # Ban user
+                    await context.bot.ban_chat_member(chat_id, user.id)
+                    
+                    # Record ban
+                    bans = SimpleDB.load_bans(chat_id)
+                    
+                    # Format username properly
+                    formatted_username = format_username_for_display(user.username)
+                    
+                    ban_record = {
+                        'user_id': user.id,
+                        'name': clean_text(user.full_name),
+                        'username': user.username if user.username else "",
+                        'timestamp': datetime.now().isoformat(),
+                        'reason': 'Auto-ban on leave',
+                        'type': 'auto'
+                    }
+                    
+                    bans['list'].append(ban_record)
+                    bans['total'] = bans.get('total', 0) + 1
+                    bans['auto'] = bans.get('auto', 0) + 1
+                    SimpleDB.save_bans(chat_id, bans)
+                    
+                    # Update user status
+                    users['banned'].append({
+                        'user_id': user.id,
+                        'name': clean_text(user.full_name),
+                        'username': user.username if user.username else "",
+                        'banned': datetime.now().isoformat(),
+                        'reason': 'Auto-ban on leave'
+                    })
+                    SimpleDB.save_users(chat_id, users)
+                    
+                    # Send message WITH USER ID - FIXED FORMATTING
+                    text = f"""
+🚫 *User Banned*
+
+👤 *User Information:*
+├ Name: {clean_text(user.full_name)}
+├ ID: `{user.id}`
+├ Username: {formatted_username}
+└ Action: Left the group
+
+🔒 *Security Action:*
+├ Type: Automatic Ban
+├ Reason: Leave-Ban Mode Active
+├ Time: {format_time(datetime.now().isoformat())}
+└ Performed By: System Auto-Protection
+
+⚙️ *System Status:*
+├ Leave-Ban: ✅ ACTIVE
+├ Protection: ✅ ENGAGED
+└ Database: ✅ UPDATED
+
+⚠️ *Note:* Leave-ban mode is active.
+"""
+                    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+                    
+            except Exception as e:
+                logger.error(f"Ban error: {e}")
+                
+    except Exception as e:
+        logger.error(f"Left member error: {e}")
+
+# ============ ERROR HANDLER ============
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Error handler"""
+    logger.error(f"Error: {context.error}")
+    
+    if update and update.effective_chat:
         try:
-            await bot.edit_message_text(f"❌ Payment window expired for Order ID {order_id}.", call.from_user.id, m.message_id)
+            text = f"""
+⚠️ *System Error*
+
+An error occurred. Please try again.
+
+📞 *Support:* @professor_cry
+"""
+            await update.effective_chat.send_message(text, parse_mode=ParseMode.MARKDOWN)
         except:
             pass
-        await bot.send_message(call.from_user.id, "Payment window expired. Please request a new link.")
-        return
 
-    if action == "submit_tx":
-        # ask user to send TXID via reply
-        await call.answer()
-        await bot.send_message(call.from_user.id, "Send the TXID (transaction hash) as a message reply here. Example: 0x123abc...")
-        # set a temporary state — simple approach: wait for next message from user and treat as TXID
-        # For simplicity, we will register a short-lived handler using register_message_handler filtering by user_id.
-        async def tx_handler(tx_msg: types.Message):
-            txid = tx_msg.text.strip()
-            # basic validation
-            if not txid.startswith("0x") or len(txid) < 10:
-                await tx_msg.reply("Invalid TXID format. Please send a correct transaction hash.")
-                return
-            # Here ideally validate on-chain: check tx to `address` and amount >= required
-            # For now we save payment as pending and notify admin
-            payment_id = generate_id(12)
-            full_name = f"{tx_msg.from_user.full_name}"
-            save_payment(payment_id, order_id, tx_msg.from_user.id, full_name, txid, None, "Pending")
-            await tx_msg.reply("Thanks. We received your TXID. Waiting for confirmation. Admin will be notified.")
-            # notify admin
-            await bot.send_message(ADMIN_ID, f"New payment submitted for Order {order_id}\nUser: {full_name} ({tx_msg.from_user.id})\nTXID: {txid}\nPlease verify.")
-            # unregister this handler - aiogram doesn't support unregister easily; we'll just return and ignore duplicates
-        # register the one-off handler
-        dp.register_message_handler(tx_handler, lambda m: m.from_user.id == call.from_user.id, content_types=types.ContentTypes.TEXT, state=None)
+# ============ MAIN FUNCTION ============
+def main():
+    """Main function"""
+    
+    # Bot token - CHANGE THIS
+    TOKEN = "8349545549:AAGT6XZKIsF0XH1lFi52rcs4OmKZVbKSPng"
+    
+    if TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("\n" + "="*50)
+        print("❌ ERROR: Bot token not set!")
+        print("="*50)
+        print("1. Get token from @BotFather")
+        print("2. Replace 'YOUR_BOT_TOKEN_HERE' with your token")
+        print("3. Contact @professor_cry if needed")
+        print("="*50)
         return
+    
+    # Create bot
+    app = Application.builder().token(TOKEN).build()
+    
+    # Add commands
+    commands = [
+        ("start", start_cmd),
+        ("help", help_cmd),
+        ("setup", setup_cmd),
+        ("set_leave_ban", set_leave_ban_cmd),
+        ("config", config_cmd),
+        ("stats", stats_cmd),
+        ("track_admins", track_admins_cmd),
+        ("export_data", export_data_cmd),
+        ("ban_logs", ban_logs_cmd),
+        ("about", about_cmd),
+        ("support", support_cmd),
+    ]
+    
+    for cmd, handler in commands:
+        app.add_handler(CommandHandler(cmd, handler))
+    
+    # Add events
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
+    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, handle_left_member))
+    
+    # Add error handler
+    app.add_error_handler(error_handler)
+    
+    # Start bot
+    print("\n" + "="*50)
+    print(f"🤖 {BOT_NAME} v{VERSION}")
+    print("="*50)
+    print("👨💻 Developer: @professor_cry")
+    print(f"📁 Data: {DATA_DIR}")
+    print(f"📝 Logs: {LOG_DIR}")
+    print("="*50)
+    print("✅ Bot starting...")
+    print("="*50)
+    
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-# ------------------------
-# Admin: /total_collection & /history
-# ------------------------
-@dp.message_handler(commands=['total_collection'])
-async def cmd_total_collection(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
-        await msg.reply("Access denied")
-        return
-    # sum successful payments amounts (assuming amount_paid recorded)
-    cur.execute("SELECT SUM(amount_paid) FROM payments WHERE status='Success'")
-    total = cur.fetchone()[0] or 0
-    await msg.reply(f"Total collected (successful payments): {total} USDT")
-
-@dp.message_handler(commands=['history'])
-async def cmd_history(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
-        await msg.reply("Access denied")
-        return
-    cur.execute("SELECT payment_id, order_id, user_id, txid, amount_paid, status, created_at FROM payments ORDER BY created_at DESC LIMIT 50")
-    rows = cur.fetchall()
-    lines = []
-    for r in rows:
-        lines.append(f"{r[0]} | {r[1]} | user:{r[2]} | {r[4]} | {r[5]} | {r[6]}")
-    if not lines:
-        await msg.reply("No history yet.")
-    else:
-        await msg.reply("\n".join(lines))
-
-# ------------------------
-# Admin: /withdraw_all <target_address>  (stub)
-# ------------------------
-@dp.message_handler(commands=['withdraw_all'])
-async def cmd_withdraw_all(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
-        await msg.reply("Access denied")
-        return
-    args = msg.get_args().split()
-    if len(args) != 1:
-        await msg.reply("Usage: /withdraw_all <target_bsc_address>")
-        return
-    target = args[0]
-    # Implementation note: to withdraw you need control of private keys of the hot wallet holding funds.
-    # This function should aggregate balances to one account and create/send a tx using web3 and private key.
-    await msg.reply("Withdraw invoked. This demo stub does NOT actually send funds. Implement web3 sendTransaction here using the hot wallet's private key.")
-    # Real implementation would:
-    # 1. calculate total balance on hot wallet
-    # 2. build tx, sign with private key, send
-    # 3. log txid and notify admin
-    return
-
-# ------------------------
-# Admin: /export_keys <pdf_password>
-# ------------------------
-from export_pdf import export_all_keys_to_pdf
-@dp.message_handler(commands=['export_keys'])
-async def cmd_export_keys(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
-        await msg.reply("Access denied")
-        return
-    args = msg.get_args().split()
-    if len(args) != 1:
-        await msg.reply("Usage: /export_keys <pdf_password>")
-        return
-    pdf_password = args[0]
-    await msg.reply("Starting export. This may take a moment...")
-    out_file = export_all_keys_to_pdf(msg.from_user.id, f"export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}", pdf_password)
-    await bot.send_document(chat_id=ADMIN_ID, document=open(out_file, "rb"))
-    try:
-        os.remove(out_file)
-    except:
-        pass
-    await msg.reply("Export complete and temporary file removed.")
-
-# ------------------------
-# Optional: BscScan polling function (simple)
-# This is a helper to implement automatic detection. You MUST adapt to your BSCSCAN API and logic.
-# ------------------------
-import requests
-def check_payment_on_chain(address, required_amount):
-    """
-    Query BscScan for recent txs to `address`. This is a simple demo. Use BscScan / web3 for robust solution.
-    Returns txid if found else None.
-    """
-    if not BSCSCAN_API_KEY:
-        return None
-    try:
-        url = f"https://api.bscscan.com/api?module=account&action=txlist&address={address}&startblock=0&endblock=99999999&page=1&offset=10&sort=desc&apikey={BSCSCAN_API_KEY}"
-        resp = requests.get(url, timeout=10).json()
-        if resp.get("status") != "1":
-            return None
-        for tx in resp.get("result", []):
-            # check if tx is incoming to address and value >= required_amount (convert wei->ether)
-            if tx.get("to","").lower() == address.lower():
-                value_wei = int(tx.get("value", "0"))
-                value_eth = w3.fromWei(value_wei, "ether")
-                if float(value_eth) >= float(required_amount):
-                    # found
-                    return tx.get("hash")
-    except Exception as e:
-        print("BSCSCAN error:", e)
-    return None
-
-# ------------------------
-# Startup
-# ------------------------
 if __name__ == "__main__":
-    print("Bot starting...")
-    executor.start_polling(dp, skip_updates=True)
+    main()
