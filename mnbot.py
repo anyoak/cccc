@@ -538,11 +538,14 @@ def process_bulk_otp_messages():
                         get_user_balance(user_id)
                     )
                     
-                    # No markup - just send plain message
+                    # Add thanks button
+                    markup = types.InlineKeyboardMarkup()
+                    thanks_btn = types.InlineKeyboardButton("🌺 Thanks For Using Our Bot", callback_data="thanks")
+                    markup.add(thanks_btn)
                     
                     # Send to user with Markdown parsing
                     try:
-                        sent_msg = bot.send_message(user_id, formatted_msg, parse_mode='Markdown')
+                        sent_msg = bot.send_message(user_id, formatted_msg, reply_markup=markup, parse_mode='Markdown')
                         
                         # Increment message count for the user
                         increment_user_message_count(user_id)
@@ -1148,9 +1151,19 @@ def callback_handler(call):
             else:
                 bot.answer_callback_query(call.id, "❌ Access denied!")
         
+        elif call.data.startswith('reply_ticket_'):
+            ticket_id = int(call.data.split('_')[2])
+            if is_admin(user_id):
+                start_ticket_reply(chat_id, ticket_id)
+            else:
+                bot.answer_callback_query(call.id, "❌ Access denied!")
+        
         elif call.data.startswith('active_page_'):
             page = int(call.data.split('_')[2])
             show_active_numbers_page(chat_id, user_id, page)
+        
+        elif call.data == 'thanks':
+            bot.answer_callback_query(call.id, "🌺 Thank you for using our service!")
         
         else:
             bot.answer_callback_query(call.id, "Unknown command")
@@ -1373,6 +1386,12 @@ Balance: ${balance:.3f}"""
             except Exception as e:
                 logger.error(f"Error sending to admin {admin_id}: {e}")
         
+        # Send to withdrawal log channel
+        try:
+            bot.send_message(WITHDRAW_LOG_CHANNEL, log_msg, reply_markup=markup)
+        except Exception as e:
+            logger.error(f"Error sending to withdrawal log channel: {e}")
+        
         bot.send_message(message.chat.id, f"✅ Withdrawal request #{withdrawal_id} submitted for ${amount:.3f}. Waiting for admin approval.")
         show_main_menu(message.chat.id)
     except Exception as e:
@@ -1416,9 +1435,12 @@ def refresh_user_database(call):
                             get_user_balance(user_id)
                         )
                         
-                        # No markup - just send plain message
+                        # Add thanks button
+                        markup = types.InlineKeyboardMarkup()
+                        thanks_btn = types.InlineKeyboardButton("🌺 Thanks For Using Our Bot", callback_data="thanks")
+                        markup.add(thanks_btn)
                         
-                        bot.send_message(user_id, formatted_msg, parse_mode='Markdown')
+                        bot.send_message(user_id, formatted_msg, reply_markup=markup, parse_mode='Markdown')
                         
                         # Increment message count
                         increment_user_message_count(user_id)
@@ -1508,6 +1530,20 @@ Your withdrawal has been processed successfully."""
         except:
             pass
         
+        # Send to withdrawal log channel
+        try:
+            log_msg = f"""✅ Withdrawal Approved #{withdraw_id}
+
+👤 User: {withdrawal['user_id']}
+💰 Amount: ${withdrawal['amount']:.3f}
+🌐 Network: {withdrawal['network']}
+📍 Address: {withdrawal['address']}
+📅 Processed: {process_date}
+👨‍💼 Admin: {call.from_user.id}"""
+            bot.send_message(WITHDRAW_LOG_CHANNEL, log_msg)
+        except Exception as e:
+            logger.error(f"Error sending to withdrawal log channel: {e}")
+        
         bot.answer_callback_query(call.id, "✅ Withdrawal approved!")
     except Exception as e:
         logger.error(f"Error in approve_withdrawal: {e}")
@@ -1550,6 +1586,20 @@ Your withdrawal has been rejected. Contact support for more information."""
             bot.send_message(withdrawal['user_id'], user_msg)
         except:
             pass
+        
+        # Send to withdrawal log channel
+        try:
+            log_msg = f"""❌ Withdrawal Rejected #{withdraw_id}
+
+👤 User: {withdrawal['user_id']}
+💰 Amount: ${withdrawal['amount']:.3f}
+🌐 Network: {withdrawal['network']}
+📍 Address: {withdrawal['address']}
+📅 Processed: {process_date}
+👨‍💼 Admin: {call.from_user.id}"""
+            bot.send_message(WITHDRAW_LOG_CHANNEL, log_msg)
+        except Exception as e:
+            logger.error(f"Error sending to withdrawal log channel: {e}")
         
         bot.answer_callback_query(call.id, "❌ Withdrawal rejected!")
     except Exception as e:
@@ -2369,6 +2419,53 @@ def show_ticket_details(chat_id, ticket_id):
         logger.error(f"Error in show_ticket_details: {e}")
         bot.send_message(chat_id, "❌ Error loading ticket details")
 
+def start_ticket_reply(chat_id, ticket_id):
+    try:
+        msg = f"📤 Please type your reply for ticket #{ticket_id}:\n\nType /cancel to cancel."
+        bot.send_message(chat_id, msg)
+        bot.register_next_step_handler_by_chat_id(chat_id, lambda m: process_ticket_reply(m, ticket_id))
+    except Exception as e:
+        logger.error(f"Error in start_ticket_reply: {e}")
+
+def process_ticket_reply(message, ticket_id):
+    try:
+        if message.text == '/cancel':
+            bot.send_message(message.chat.id, "Ticket reply cancelled.")
+            return
+        
+        # Get ticket
+        ticket = db.fetchone('''SELECT t.*, u.user_id as user_id
+                                FROM support_tickets t
+                                LEFT JOIN users u ON t.user_id = u.user_id
+                                WHERE t.id = ?''', (ticket_id,))
+        
+        if not ticket:
+            bot.send_message(message.chat.id, "❌ Ticket not found.")
+            return
+        
+        # Update ticket
+        resolved_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        db.execute('''UPDATE support_tickets SET status = 'closed', resolved_date = ?, 
+                      admin_id = ?, admin_reply = ? WHERE id = ?''',
+                   (resolved_date, message.from_user.id, message.text, ticket_id))
+        
+        # Notify user
+        user_msg = f"""📩 Reply to your support ticket #{ticket_id}
+
+Admin: @{message.from_user.username or 'N/A'}
+Reply: {message.text}
+
+Your ticket has been closed."""
+        try:
+            bot.send_message(ticket['user_id'], user_msg)
+        except Exception as e:
+            logger.error(f"Error sending reply to user {ticket['user_id']}: {e}")
+        
+        bot.send_message(message.chat.id, f"✅ Reply sent for ticket #{ticket_id} and ticket closed.")
+    except Exception as e:
+        logger.error(f"Error in process_ticket_reply: {e}")
+        bot.send_message(message.chat.id, "❌ An error occurred.")
+
 def export_stats(chat_id):
     try:
         # Create CSV data
@@ -2482,11 +2579,14 @@ def handle_group_message(message):
                     number, text, timestamp, False, get_user_balance(user_id)
                 )
                 
-                # No markup - just send plain message
+                # Add thanks button
+                markup = types.InlineKeyboardMarkup()
+                thanks_btn = types.InlineKeyboardButton("🌺 Thanks For Using Our Bot", callback_data="thanks")
+                markup.add(thanks_btn)
                 
                 # Send to user
                 try:
-                    bot.send_message(user_id, formatted_msg, parse_mode='Markdown')
+                    bot.send_message(user_id, formatted_msg, reply_markup=markup, parse_mode='Markdown')
                     
                     # Increment message count
                     increment_user_message_count(user_id)
@@ -2710,6 +2810,7 @@ if __name__ == "__main__":
     print("🤖 Bot is starting...")
     print(f"📊 Monitoring group: {MONITORED_GROUP_ID}")
     print(f"👑 Admins: {ADMIN_IDS}")
+    print(f"📣 Withdrawal Log Channel: {WITHDRAW_LOG_CHANNEL}")
     print(f"🔗 OTP Group: {OTP_GROUP_LINK}")
     print("✅ All features enabled:")
     print("   - OTP detection from all bot messages in group")
@@ -2717,6 +2818,9 @@ if __name__ == "__main__":
     print("   - Enhanced regex patterns for number extraction")
     print("   - Real-time message processing")
     print("   - Clean OTP message format as requested")
+    print("   - Withdrawal approve/reject system fixed")
+    print("   - Support ticket reply system added")
+    print("   - 'Thanks For Using Our Bot' button restored")
     
     try:
         bot.infinity_polling(timeout=60, long_polling_timeout=30)
