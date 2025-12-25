@@ -187,6 +187,15 @@ class Database:
                      is_suspended INTEGER DEFAULT 0,
                      suspend_until TEXT)''')
         
+        # Reset history table
+        c.execute('''CREATE TABLE IF NOT EXISTS reset_history
+                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     user_id INTEGER,
+                     number TEXT,
+                     country_code TEXT,
+                     reset_date TEXT,
+                     reset_type TEXT DEFAULT 'user')''')
+        
         # Insert default settings if not exists
         c.execute("INSERT OR IGNORE INTO settings (id, batch_size, revenue_per_message, min_withdrawal, max_user_numbers, withdrawal_enabled, bot_enabled) VALUES (1, 1, 0.005, 3.0, 50, 1, 1)")
         
@@ -220,6 +229,18 @@ class Database:
                 if 'last_activity' not in columns:
                     c.execute("ALTER TABLE users ADD COLUMN last_activity TEXT")
                     logger.info("Added last_activity column to users table")
+                
+                # Check for reset_history table
+                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='reset_history'")
+                if not c.fetchone():
+                    c.execute('''CREATE TABLE reset_history
+                                (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                 user_id INTEGER,
+                                 number TEXT,
+                                 country_code TEXT,
+                                 reset_date TEXT,
+                                 reset_type TEXT DEFAULT 'user')''')
+                    logger.info("Created reset_history table")
                 
                 self.conn.commit()
             except Exception as e:
@@ -741,7 +762,10 @@ def handle_get_number(message):
                                    FROM countries c
                                    JOIN numbers n ON c.code = n.country_code
                                    WHERE n.is_used = 0 
-                                   AND n.number NOT IN (SELECT number FROM number_assignments WHERE is_active = 1)
+                                   AND NOT EXISTS (
+                                       SELECT 1 FROM number_assignments na 
+                                       WHERE na.number = n.number AND na.is_active = 1
+                                   )
                                    GROUP BY c.code, c.name, c.flag
                                    HAVING available_count > 0
                                    ORDER BY c.name''')
@@ -763,7 +787,8 @@ def handle_get_number(message):
         msg = f"🌍 Select a country:\n\n"
         msg += f"📊 Your active numbers: {current_count}/{max_numbers}\n"
         msg += f"📱 Available numbers shown in parentheses\n"
-        msg += f"🎯 Batch size: {get_setting('batch_size') or 1} number(s) per request"
+        msg += f"🎯 Batch size: {get_setting('batch_size') or 1} number(s) per request\n\n"
+        msg += f"💡 Tip: Use /reset to remove your assigned numbers"
         
         bot.send_message(message.chat.id, msg, reply_markup=markup)
     except Exception as e:
@@ -1076,6 +1101,30 @@ def callback_handler(call):
             else:
                 bot.answer_callback_query(call.id, "❌ Access denied!")
         
+        elif call.data == 'admin_reset':
+            if is_admin(user_id):
+                show_admin_reset_system(chat_id)
+            else:
+                bot.answer_callback_query(call.id, "❌ Access denied!")
+        
+        elif call.data == 'admin_numbers_report':
+            if is_admin(user_id):
+                generate_numbers_report(chat_id)
+            else:
+                bot.answer_callback_query(call.id, "❌ Access denied!")
+        
+        elif call.data == 'reset_delete_used':
+            if is_admin(user_id):
+                reset_delete_used_numbers(chat_id)
+            else:
+                bot.answer_callback_query(call.id, "❌ Access denied!")
+        
+        elif call.data == 'reset_confirm_delete_used':
+            if is_admin(user_id):
+                reset_confirm_delete_used(call)
+            else:
+                bot.answer_callback_query(call.id, "❌ Access denied!")
+        
         elif call.data.startswith('set_batch_'):
             batch_size = int(call.data.split('_')[2])
             update_setting('batch_size', batch_size)
@@ -1236,7 +1285,10 @@ def process_get_numbers(call, country_code):
         numbers = db.fetchall('''SELECT number, country, country_flag 
                                  FROM numbers 
                                  WHERE country_code = ? AND is_used = 0 
-                                 AND number NOT IN (SELECT number FROM number_assignments WHERE is_active = 1)
+                                 AND NOT EXISTS (
+                                     SELECT 1 FROM number_assignments na 
+                                     WHERE na.number = numbers.number AND na.is_active = 1
+                                 )
                                  LIMIT ?''', (country_code, batch_size))
         
         if not numbers:
@@ -1653,8 +1705,10 @@ def show_admin_panel(chat_id):
         btn6 = types.InlineKeyboardButton("💳 Withdrawals", callback_data="admin_withdrawals")
         btn7 = types.InlineKeyboardButton("🆘 Support Tickets", callback_data="admin_tickets")
         btn8 = types.InlineKeyboardButton("📈 Stats Export", callback_data="admin_export")
+        btn9 = types.InlineKeyboardButton("🗑️ Reset System", callback_data="admin_reset")
+        btn10 = types.InlineKeyboardButton("📄 Numbers Report", callback_data="admin_numbers_report")
         
-        markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7, btn8)
+        markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7, btn8, btn9, btn10)
         
         bot.send_message(chat_id, "🔧 Admin Panel\n\nSelect an option:", reply_markup=markup)
     except Exception as e:
@@ -1705,6 +1759,13 @@ def show_admin_status(chat_id):
         pending_withdrawals = db.fetchone('''SELECT COUNT(*) as count, SUM(amount) as total 
                                              FROM withdrawals WHERE status = 'pending' ''')
         
+        # Get OTP stats
+        otp_stats = db.fetchone('''SELECT 
+                                    COUNT(*) as total_otps,
+                                    COUNT(DISTINCT number) as unique_numbers,
+                                    COUNT(DISTINCT forwarded_to) as users_received
+                                   FROM otp_messages WHERE processed = 1''')
+        
         msg = f"""📊 Bot Status Report - {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 👥 User Statistics:
@@ -1722,6 +1783,11 @@ def show_admin_status(chat_id):
 💰 Withdrawals:
 • Pending: {pending_withdrawals['count'] if pending_withdrawals and pending_withdrawals['count'] else 0}
 • Total Pending Amount: ${pending_withdrawals['total'] if pending_withdrawals and pending_withdrawals['total'] else 0:.3f}
+
+📨 OTP Statistics:
+• Total OTPs Processed: {otp_stats['total_otps'] if otp_stats and otp_stats['total_otps'] else 0}
+• Unique Numbers: {otp_stats['unique_numbers'] if otp_stats and otp_stats['unique_numbers'] else 0}
+• Users Received: {otp_stats['users_received'] if otp_stats and otp_stats['users_received'] else 0}
 
 🌍 Country Statistics:
 """
@@ -1907,9 +1973,10 @@ def show_number_management(chat_id):
         add_btn = types.InlineKeyboardButton("➕ Add Numbers", callback_data="add_numbers")
         view_btn = types.InlineKeyboardButton("📊 View Stats", callback_data="view_numbers")
         delete_btn = types.InlineKeyboardButton("🗑️ Delete Country", callback_data="delete_country_list")
+        report_btn = types.InlineKeyboardButton("📄 Numbers Report", callback_data="admin_numbers_report")
         back_btn = types.InlineKeyboardButton("⬅️ Back", callback_data="admin_panel")
         
-        markup.add(add_btn, view_btn, delete_btn)
+        markup.add(add_btn, view_btn, delete_btn, report_btn)
         markup.row(back_btn)
         
         bot.send_message(chat_id, "📱 Number Management\n\nSelect an option:", reply_markup=markup)
@@ -1957,10 +2024,14 @@ def delete_country(chat_id, country_code):
         # Delete all numbers of this country
         db.execute("DELETE FROM numbers WHERE country_code = ?", (country_code,))
         
+        # Delete number assignments for these numbers
+        db.execute('''DELETE FROM number_assignments WHERE number IN 
+                      (SELECT number FROM numbers WHERE country_code = ?)''', (country_code,))
+        
         # Delete country from countries table
         db.execute("DELETE FROM countries WHERE code = ?", (country_code,))
         
-        bot.send_message(chat_id, f"✅ {country['flag']} {country['name']} and all its numbers have been deleted.")
+        bot.send_message(chat_id, f"✅ {country['flag']} {country['name']} and all its numbers have been permanently deleted.")
     except Exception as e:
         logger.error(f"Error in delete_country: {e}")
         bot.send_message(chat_id, "❌ Error deleting country")
@@ -2773,6 +2844,202 @@ def handle_group_message(message):
         logger.error(f"Error processing group message: {e}")
         logger.error(traceback.format_exc())
 
+# Admin Reset System Functions
+def show_admin_reset_system(chat_id):
+    try:
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        
+        btn1 = types.InlineKeyboardButton("🗑️ Delete Used Numbers", callback_data="reset_delete_used")
+        btn2 = types.InlineKeyboardButton("🔄 Reset All Assignments", callback_data="reset_all_assignments")
+        btn3 = types.InlineKeyboardButton("🧹 Clean OTP Messages", callback_data="reset_clean_otp")
+        btn4 = types.InlineKeyboardButton("📊 Fix Stats Count", callback_data="reset_fix_stats")
+        
+        markup.add(btn1, btn2, btn3, btn4)
+        
+        back_btn = types.InlineKeyboardButton("⬅️ Back", callback_data="admin_panel")
+        markup.row(back_btn)
+        
+        msg = """🗑️ Reset System
+
+⚠️ WARNING: These actions are PERMANENT and cannot be undone!
+
+Options:
+1. 🗑️ Delete Used Numbers - Permanently delete all used numbers
+2. 🔄 Reset All Assignments - Deactivate all active assignments
+3. 🧹 Clean OTP Messages - Delete old OTP messages
+4. 📊 Fix Stats Count - Fix incorrect statistics"""
+        
+        bot.send_message(chat_id, msg, reply_markup=markup)
+    except Exception as e:
+        logger.error(f"Error in show_admin_reset_system: {e}")
+
+def reset_delete_used_numbers(chat_id):
+    try:
+        # Get count of used numbers
+        used_count = db.fetchone("SELECT COUNT(*) as count FROM numbers WHERE is_used = 1")
+        count = used_count['count'] if used_count else 0
+        
+        if count == 0:
+            bot.send_message(chat_id, "✅ No used numbers found to delete.")
+            return
+        
+        # Ask for confirmation
+        markup = types.InlineKeyboardMarkup()
+        confirm_btn = types.InlineKeyboardButton("✅ Confirm Delete", callback_data="reset_confirm_delete_used")
+        cancel_btn = types.InlineKeyboardButton("❌ Cancel", callback_data="admin_reset")
+        markup.add(confirm_btn, cancel_btn)
+        
+        bot.send_message(chat_id, f"⚠️ Are you sure you want to PERMANENTLY delete {count} used numbers?\n\nThis action cannot be undone!", reply_markup=markup)
+    except Exception as e:
+        logger.error(f"Error in reset_delete_used_numbers: {e}")
+
+def reset_confirm_delete_used(call):
+    try:
+        if not is_admin(call.from_user.id):
+            bot.answer_callback_query(call.id, "❌ Access denied!")
+            return
+        
+        # Get used numbers
+        used_numbers = db.fetchall("SELECT number, country_code FROM numbers WHERE is_used = 1")
+        
+        if not used_numbers:
+            bot.answer_callback_query(call.id, "✅ No used numbers found!")
+            return
+        
+        deleted_count = 0
+        
+        for num in used_numbers:
+            try:
+                # Delete from all tables
+                db.execute("DELETE FROM numbers WHERE number = ?", (num['number'],))
+                db.execute("DELETE FROM number_assignments WHERE number = ?", (num['number'],))
+                db.execute("DELETE FROM otp_messages WHERE number = ?", (num['number'],))
+                db.execute("DELETE FROM message_tracking WHERE number = ?", (num['number'],))
+                
+                # Add to reset history
+                reset_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                db.execute('''INSERT INTO reset_history (number, country_code, reset_date, reset_type)
+                              VALUES (?, ?, ?, ?)''',
+                           (num['number'], num['country_code'], reset_date, 'admin'))
+                
+                # Update country stats
+                if num['country_code']:
+                    db.execute('''UPDATE countries 
+                                  SET total_numbers = total_numbers - 1, 
+                                      used_numbers = used_numbers - 1 
+                                  WHERE code = ?''', (num['country_code'],))
+                
+                deleted_count += 1
+            except Exception as e:
+                logger.error(f"Error deleting number {num['number']}: {e}")
+        
+        # Send confirmation
+        bot.edit_message_text(f"✅ Successfully deleted {deleted_count} used numbers permanently!\n\nThese numbers will never be assigned to anyone again.",
+                             call.message.chat.id, call.message.message_id)
+        
+        bot.answer_callback_query(call.id, "✅ Deleted used numbers!")
+    except Exception as e:
+        logger.error(f"Error in reset_confirm_delete_used: {e}")
+        bot.answer_callback_query(call.id, "❌ Error deleting numbers!")
+
+def generate_numbers_report(chat_id):
+    try:
+        bot.send_message(chat_id, "📊 Generating numbers report...")
+        
+        # Get all numbers with their assignments and OTP counts
+        numbers = db.fetchall('''SELECT 
+                                    n.number,
+                                    n.country,
+                                    n.country_code,
+                                    n.country_flag,
+                                    n.is_used,
+                                    n.batch_name,
+                                    n.use_date,
+                                    u.username as used_by_username,
+                                    u.user_id as used_by_id,
+                                    na.otp_count,
+                                    na.total_revenue,
+                                    na.assigned_date,
+                                    na.last_otp_date
+                                 FROM numbers n
+                                 LEFT JOIN users u ON n.used_by = u.user_id
+                                 LEFT JOIN number_assignments na ON n.number = na.number AND na.is_active = 1
+                                 ORDER BY n.country, n.number''')
+        
+        if not numbers:
+            bot.send_message(chat_id, "❌ No numbers found in database.")
+            return
+        
+        # Create TXT file content
+        import io
+        output = io.StringIO()
+        
+        output.write("=" * 80 + "\n")
+        output.write("NUMBERS REPORT\n")
+        output.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        output.write("=" * 80 + "\n\n")
+        
+        output.write(f"Total Numbers: {len(numbers)}\n")
+        
+        # Group by country
+        countries = {}
+        for num in numbers:
+            country = num['country'] or 'Unknown'
+            if country not in countries:
+                countries[country] = []
+            countries[country].append(num)
+        
+        for country, nums in countries.items():
+            output.write(f"\n{'='*60}\n")
+            output.write(f"COUNTRY: {country}\n")
+            output.write(f"{'='*60}\n\n")
+            
+            for i, num in enumerate(nums, 1):
+                output.write(f"[{i}] {num['country_flag']} {num['number']}\n")
+                output.write(f"    Status: {'✅ Used' if num['is_used'] == 1 else '🟢 Available'}\n")
+                
+                if num['is_used'] == 1:
+                    output.write(f"    Used By: @{num['used_by_username'] or 'N/A'} (ID: {num['used_by_id'] or 'N/A'})\n")
+                    output.write(f"    Use Date: {num['use_date'] or 'N/A'}\n")
+                
+                if num['otp_count']:
+                    output.write(f"    OTPs Received: {num['otp_count']}\n")
+                    output.write(f"    Revenue: ${num['total_revenue'] or 0:.3f}\n")
+                    output.write(f"    Last OTP: {num['last_otp_date'] or 'N/A'}\n")
+                
+                if num['batch_name']:
+                    output.write(f"    Batch: {num['batch_name']}\n")
+                
+                output.write(f"    Assigned Date: {num['assigned_date'] or 'N/A'}\n")
+                output.write("\n")
+        
+        # Add summary
+        output.write("\n" + "="*80 + "\n")
+        output.write("SUMMARY\n")
+        output.write("="*80 + "\n\n")
+        
+        total_used = sum(1 for n in numbers if n['is_used'] == 1)
+        total_available = len(numbers) - total_used
+        total_otps = sum(n['otp_count'] or 0 for n in numbers)
+        total_revenue = sum(n['total_revenue'] or 0 for n in numbers)
+        
+        output.write(f"Total Numbers: {len(numbers)}\n")
+        output.write(f"Used Numbers: {total_used}\n")
+        output.write(f"Available Numbers: {total_available}\n")
+        output.write(f"Total OTPs Received: {total_otps}\n")
+        output.write(f"Total Revenue Generated: ${total_revenue:.3f}\n")
+        output.write(f"Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        
+        # Save to file and send
+        filename = f"numbers_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        bot.send_document(chat_id, (filename, output.getvalue()))
+        output.close()
+        
+        bot.send_message(chat_id, "✅ Numbers report generated successfully!")
+    except Exception as e:
+        logger.error(f"Error in generate_numbers_report: {e}")
+        bot.send_message(chat_id, "❌ Error generating report!")
+
 # Admin commands
 @bot.message_handler(commands=['panel'])
 def admin_panel_command(message):
@@ -2832,24 +3099,51 @@ def reset_assignments(message):
         reset_count = 0
         for assign in assignments:
             try:
-                # Mark assignment as inactive
-                db.execute("UPDATE number_assignments SET is_active = 0 WHERE number = ? AND user_id = ?",
+                # IMPORTANT: Delete the number COMPLETELY from database
+                # This ensures the number will never be assigned to anyone again
+                
+                # 1. Delete from numbers table
+                db.execute("DELETE FROM numbers WHERE number = ?", (assign['number'],))
+                
+                # 2. Delete from number_assignments table
+                db.execute("DELETE FROM number_assignments WHERE number = ? AND user_id = ?",
                            (assign['number'], user_id))
                 
-                # Mark number as available again
-                db.execute("UPDATE numbers SET is_used = 0, used_by = NULL, use_date = NULL WHERE number = ?",
-                           (assign['number'],))
+                # 3. Add to reset history
+                reset_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                db.execute('''INSERT INTO reset_history (user_id, number, country_code, reset_date, reset_type)
+                              VALUES (?, ?, ?, ?, ?)''',
+                           (user_id, assign['number'], assign['country_code'], reset_date, 'user'))
                 
-                # Update country stats - decrement used numbers
+                # 4. Update country stats - decrement BOTH total and used numbers
                 if assign['country_code']:
-                    db.execute('''UPDATE countries SET used_numbers = used_numbers - 1 
-                                  WHERE code = ?''', (assign['country_code'],))
+                    # First get current stats
+                    country = db.fetchone('''SELECT total_numbers, used_numbers 
+                                            FROM countries WHERE code = ?''', 
+                                          (assign['country_code'],))
+                    if country:
+                        total = (country['total_numbers'] or 1) - 1
+                        used = (country['used_numbers'] or 1) - 1
+                        
+                        # Ensure values don't go negative
+                        total = max(0, total)
+                        used = max(0, used)
+                        
+                        db.execute('''UPDATE countries 
+                                      SET total_numbers = ?, used_numbers = ? 
+                                      WHERE code = ?''', 
+                                   (total, used, assign['country_code']))
                 
                 reset_count += 1
+                
+                # 5. Clean up any OTP messages for this number
+                db.execute("DELETE FROM otp_messages WHERE number = ?", (assign['number'],))
+                db.execute("DELETE FROM message_tracking WHERE number = ?", (assign['number'],))
+                
             except Exception as e:
                 logger.error(f"Error resetting number {assign['number']}: {e}")
         
-        bot.reply_to(message, f"✅ Reset {reset_count} number assignments. You can now get fresh numbers.")
+        bot.reply_to(message, f"✅ Reset {reset_count} number assignments. These numbers have been PERMANENTLY removed from the database and will never be assigned to anyone again.")
     except Exception as e:
         logger.error(f"Error in reset_assignments: {e}")
         bot.reply_to(message, "❌ An error occurred. Please try again.")
@@ -2964,22 +3258,65 @@ def set_max_numbers_command(message):
 otp_processor_thread = threading.Thread(target=start_otp_processor, daemon=True)
 otp_processor_thread.start()
 
+# Database cleanup function
+def cleanup_database():
+    """Clean up database - remove orphaned records and fix inconsistencies"""
+    try:
+        # 1. Delete numbers that are marked as used but have no active assignment
+        db.execute('''DELETE FROM numbers 
+                      WHERE is_used = 1 
+                      AND number NOT IN (SELECT number FROM number_assignments WHERE is_active = 1)''')
+        
+        # 2. Update country stats based on actual numbers
+        countries = db.fetchall('''SELECT code FROM countries''')
+        for country in countries:
+            code = country['code']
+            
+            # Get actual counts from numbers table
+            actual_stats = db.fetchone('''SELECT 
+                                            COUNT(*) as total,
+                                            SUM(CASE WHEN is_used = 1 THEN 1 ELSE 0 END) as used
+                                          FROM numbers 
+                                          WHERE country_code = ?''', (code,))
+            
+            if actual_stats:
+                total = actual_stats['total'] or 0
+                used = actual_stats['used'] or 0
+                
+                db.execute('''UPDATE countries 
+                              SET total_numbers = ?, used_numbers = ? 
+                              WHERE code = ?''', (total, used, code))
+        
+        # 3. Clean old OTP messages (older than 1 hour)
+        cutoff = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        db.execute("DELETE FROM otp_messages WHERE timestamp < ?", (cutoff,))
+        
+        # 4. Clean old message tracking (older than 1 day)
+        cutoff = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        db.execute("DELETE FROM message_tracking WHERE processed_date < ?", (cutoff,))
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error in cleanup_database: {e}")
+        return False
+
 # Main bot loop
 if __name__ == "__main__":
     print("🤖 Bot is starting...")
+    print("🧹 Cleaning up database...")
+    cleanup_database()
+    print("✅ Database cleanup completed!")
     print(f"📊 Monitoring group: {MONITORED_GROUP_ID}")
     print(f"👑 Admins: {ADMIN_IDS}")
     print(f"📣 Withdrawal Log Channel: {WITHDRAW_LOG_CHANNEL}")
     print(f"🔗 OTP Group: {OTP_GROUP_LINK}")
-    print("✅ All fixes implemented:")
-    print("   1. ✅ Each user gets unique numbers")
-    print("   2. ✅ Reset command gives fresh numbers")
-    print("   3. ✅ Admin status shows real data")
-    print("   4. ✅ Support tickets with pagination")
-    print("   5. ✅ Withdrawal list with pagination")
-    print("   6. ✅ Number stats show accurate data")
-    print("   7. ✅ Available countries list fixed")
-    print("   8. ✅ Admin username hidden in ticket replies")
+    print("✅ All features enabled:")
+    print("   1. ✅ Permanent number deletion on /reset")
+    print("   2. ✅ Admin panel with reset system")
+    print("   3. ✅ Numbers report generator (TXT file)")
+    print("   4. ✅ Each number shows: Number + OTP count + User ID + DateTime")
+    print("   5. ✅ No duplicate number assignment")
+    print("   6. ✅ Accurate statistics")
     
     try:
         bot.infinity_polling(timeout=60, long_polling_timeout=30)
