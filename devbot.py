@@ -1,8 +1,8 @@
 from telethon import TelegramClient, events
 
 # ========= CONFIG =========
-api_id =           # <-- তোমার api_id
-api_hash = "API_HASH"    # <-- তোমার api_hash
+api_id = 38691424      # <-- তোমার api_id
+api_hash = "c5dced87ba4b0a8c655b9682eaf5c742"    # <-- তোমার api_hash
 group_id = -1003437559135
 
 TARGET_BOTS = {
