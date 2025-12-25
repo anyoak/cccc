@@ -376,46 +376,95 @@ def check_rate_limit(user_id):
         return True, ""
 
 def extract_otp_from_message(text):
-    """Extract OTP code from message text"""
+    """Extract OTP code from message text - enhanced for all formats"""
     if not text:
         return None
     
+    # Clean text first
+    text = str(text).strip()
+    
     patterns = [
-        r'\b\d{4,6}\b',
-        r'code[:\s]*(\d{4,6})',
-        r'OTP[:\s]*(\d{4,6})',
-        r'verification[:\s]*(\d{4,6})',
-        r'password[:\s]*(\d{4,6})'
+        r'\b\d{4,8}\b',  # 4 to 8 digit OTP
+        r'code[:\s\-]*(\d{4,8})',
+        r'OTP[:\s\-]*(\d{4,8})',
+        r'verification[:\s\-]*(\d{4,8})',
+        r'password[:\s\-]*(\d{4,8})',
+        r'(\d{4,8})\s+is your',
+        r'(\d{4,8})\s+is the',
+        r'Your.*code.*is.*(\d{4,8})',
+        r'Use.*(\d{4,8})',
+        r'[Cc]ode.*\s(\d{4,8})',
+        r'\b[A-Z0-9]{4,8}\b'  # Alphanumeric codes
     ]
     
     for pattern in patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+        if matches:
+            for match in matches:
+                if isinstance(match, tuple):
+                    match = match[0]
+                # Validate it's a number or alphanumeric
+                if re.match(r'^[A-Z0-9]{4,8}$', match, re.IGNORECASE):
+                    return match
+    
+    # Special cases
+    # Look for patterns like "1234 is your verification code"
+    special_patterns = [
+        r'(\d{4,8})\s*(?:is|as)\s*(?:your|the)\s*(?:code|OTP|verification|password)',
+        r'(?:code|OTP|verification|password)\s*(?:is|:)\s*(\d{4,8})'
+    ]
+    
+    for pattern in special_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(1) if match.groups() else match.group(0)
+        if match and match.group(1):
+            return match.group(1)
     
     return None
 
 def extract_number_from_text(text):
-    """Extract phone number from text"""
+    """Extract phone number from text - enhanced for all formats"""
     if not text:
         return None
     
+    # Clean text
+    text = str(text).replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+    
+    # Multiple patterns for different formats
     patterns = [
-        r'\+\d{10,15}',
-        r'\b\d{10,15}\b',
-        r'\(\d{3}\)\s?\d{3}[-\.]?\d{4}',
+        r'\+\d{10,15}',  # International format
+        r'\b1\d{10}\b',  # US numbers starting with 1
+        r'\b\d{11}\b',   # 11 digit numbers
+        r'\b\d{10}\b',   # 10 digit numbers
+        r'\b\d{12,15}\b', # Longer numbers
+        r'tel[:=]?(\+\d+)',  # tel: links
+        r'phone[:=]?(\+\d+)', # phone: links
     ]
     
     for pattern in patterns:
         matches = re.findall(pattern, text)
         if matches:
-            return matches[0]
+            # Clean the number
+            number = matches[0]
+            # Ensure it starts with +
+            if not number.startswith('+') and len(number) >= 10:
+                # Try to add country code
+                if number.startswith('1') and len(number) == 11:
+                    number = '+' + number
+                elif len(number) == 10:
+                    # Default to US
+                    number = '+1' + number
+                else:
+                    number = '+' + number
+            return number
     
     return None
 
 def get_country_from_number(number):
     """Get country information from phone number using phonenumbers and pycountry"""
     try:
+        # Clean number
+        number = str(number).strip()
+        
         # Parse phone number
         parsed = phonenumbers.parse(number)
         country_code = phonenumbers.region_code_for_number(parsed)
@@ -436,31 +485,48 @@ def get_country_from_number(number):
 def get_flag_emoji(country_code):
     """Convert country code to flag emoji"""
     try:
-        # Convert country code to regional indicator symbols
-        code = country_code.upper()
-        if len(code) == 2:
-            # Regional Indicator Symbols
-            base = 127462 - ord('A')
-            emoji = chr(ord(code[0]) + base) + chr(ord(code[1]) + base)
-            return emoji
+        if not country_code or len(country_code) != 2:
+            return '🏳️'
+        
+        # Regional Indicator Symbols
+        offset = 127397
+        return chr(ord(country_code[0].upper()) + offset) + chr(ord(country_code[1].upper()) + offset)
     except:
-        pass
-    return '🏳️'
+        return '🏳️'
 
 def format_otp_message(number, message_text, timestamp, revenue_added=False, user_balance=0.0):
     """Format OTP message in the specified style"""
     country_flag, country_name = get_country_from_number(number)
     otp_code = extract_otp_from_message(message_text)
     
-    # Include the number and OTP in monospace for easy copying
-    message = f"""🆕 Text Message Found!
+    # Format timestamp nicely
+    try:
+        time_obj = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+        formatted_time = time_obj.strftime("%I:%M %p")
+    except:
+        formatted_time = timestamp
+    
+    # Create message with better formatting
+    message = f"""🆕 *Text Message Found!*
 
 └ {country_flag} Number: `{number}`
 └ 🔐 OTP: `{otp_code if otp_code else 'Not Found'}`
-
-"""    
+└ ⏰ Time: {formatted_time}
+"""
+    
+    # If OTP found, make it more prominent
+    if otp_code:
+        message += f"\n📋 *Copy OTP:* `{otp_code}`"
+    
+    # Add original message snippet
+    if message_text:
+        # Clean message text
+        clean_text = message_text.replace('`', "'").replace('*', '')
+        snippet = clean_text[:150] + "..." if len(clean_text) > 150 else clean_text
+        message += f"\n\n📝 *Message:*\n{snippet}"
+    
     if revenue_added:
-        message += f"ᐛ Revenue Credited Successfully!\n෴ Current Balance: ${user_balance:.3f}"
+        message += f"\n\n✅ *Revenue Credited Successfully!*\n෴ Current Balance: ${user_balance:.3f}"
     
     return message, otp_code, country_flag, country_name
 
@@ -609,7 +675,7 @@ def send_welcome(message):
             bot.send_document(message.chat.id, start_msg, caption="Welcome!")
         else:
             # Default welcome message
-            welcome_msg = """🤖 Welcome to SMS Verification Bot!
+            welcome_msg = """🤖 Welcome to FutureTech Bot!
 
 💰 Earn money by receiving SMS/OTP
 🌍 Numbers from multiple countries
@@ -617,6 +683,8 @@ def send_welcome(message):
 
 ~ Main Channel: @FutureTech30
 ~ Public Otp Group: @FutureTechotp
+
+/reset  - use this command for remove assigned number
 
 Use the buttons below to navigate:"""
             bot.send_message(message.chat.id, welcome_msg)
@@ -799,7 +867,7 @@ def show_active_numbers_page(chat_id, user_id, page=0):
         
         msg = f"📊 Your Active Numbers (Page {page + 1}):\n\n"
         for i, assign in enumerate(assignments, offset + 1):
-            msg += f"{i}. {assign['country_flag']} {assign['number']}\n"
+            msg += f"{i}. {assign['country_flag']} `{assign['number']}`\n"
             msg += f"   📅 Assigned: {assign['assigned_date']}\n"
             msg += f"   📨 OTPs: {assign['otp_count']}\n"
             msg += f"   💰 Revenue: ${assign['total_revenue']:.3f}\n\n"
@@ -827,7 +895,7 @@ def show_active_numbers_page(chat_id, user_id, page=0):
         if pagination_btns:
             markup.row(*pagination_btns)
         
-        bot.send_message(chat_id, msg, reply_markup=markup)
+        bot.send_message(chat_id, msg, reply_markup=markup, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Error in show_active_numbers_page: {e}")
 
@@ -1172,15 +1240,15 @@ def process_get_numbers(call, country_code):
             
             assigned_numbers.append(num)
         
-        # Create message with numbers in monospace format (tap to copy)
+        # Create message with numbers in tappable format (each number in separate backticks)
         msg = f"✅ Here are your {len(assigned_numbers)} number(s):\n\n"
-        msg += "```\n"
         for i, num in enumerate(assigned_numbers, 1):
-            msg += f"{i}. {num['country_flag']} {num['number']}\n"
-        msg += "```\n"
+            # Each number in separate backticks for individual tap-to-copy
+            msg += f"{i}. {num['country_flag']} `{num['number']}`\n"
+        
         msg += f"\n📨 OTPs will be forwarded automatically when received.\n"
         msg += f"📊 Active numbers: {current_count + len(assigned_numbers)}/{max_numbers}\n"
-        msg += f"\nTap on a number to copy it."
+        msg += f"\n*Tap on a number to copy it.*"
         
         # Create inline keyboard
         markup = types.InlineKeyboardMarkup()
@@ -2373,31 +2441,69 @@ def export_stats(chat_id):
         logger.error(f"Error in export_stats: {e}")
         bot.send_message(chat_id, "❌ Error exporting stats")
 
-# Group message monitoring
+# Enhanced Group message monitoring - detects all messages including from other bots
 @bot.message_handler(func=lambda message: message.chat.id == MONITORED_GROUP_ID)
 def handle_group_message(message):
     """Monitor OTP group messages and store them for processing"""
     try:
+        logger.info(f"New message in group {MONITORED_GROUP_ID} from {message.from_user.id if message.from_user else 'Unknown'}")
+        
+        # Get message text
         text = message.text or message.caption or ""
         
-        # Extract number from message
-        number = extract_number_from_text(text)
-        if not number:
+        if not text:
+            logger.info("Message has no text content")
             return
         
-        # Get country info
-        country_flag, country_name = get_country_from_number(number)
-        
-        # Extract OTP
-        otp_code = extract_otp_from_message(text)
-        
-        # Store in database
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(f"Message text: {text[:200]}...")
         
         # Check if message already processed
         existing = db.fetchone("SELECT id FROM message_tracking WHERE message_id = ?", (message.message_id,))
         if existing:
+            logger.info(f"Message {message.message_id} already processed")
             return
+        
+        # Enhanced number extraction - try multiple methods
+        number = None
+        
+        # Method 1: Extract using regex patterns
+        number = extract_number_from_text(text)
+        
+        # Method 2: If regex fails, try to find any pattern that looks like a phone number
+        if not number:
+            # Look for common phone number patterns
+            patterns = [
+                r'\+\d{10,15}',
+                r'\b1\d{10}\b',  # US numbers
+                r'\b\d{11}\b',   # 11 digit numbers
+                r'\b\d{10}\b',   # 10 digit numbers
+                r'(\+\d{1,3}[\s\-]?)?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{4}',  # General pattern
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, text)
+                if matches:
+                    number = matches[0]
+                    # Clean the number
+                    number = re.sub(r'[^\d+]', '', str(number))
+                    break
+        
+        if not number:
+            logger.info(f"No number found in message: {text[:100]}...")
+            return
+        
+        logger.info(f"Extracted number: {number}")
+        
+        # Get country info
+        country_flag, country_name = get_country_from_number(number)
+        logger.info(f"Country info: {country_name} {country_flag}")
+        
+        # Extract OTP - enhanced extraction
+        otp_code = extract_otp_from_message(text)
+        logger.info(f"Extracted OTP: {otp_code}")
+        
+        # Store in database
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         # Store message tracking
         db.execute("INSERT INTO message_tracking (message_id, number, processed_date) VALUES (?, ?, ?)",
@@ -2411,10 +2517,73 @@ def handle_group_message(message):
                    (number, text, otp_code, timestamp, timestamp, 
                     country_name, country_flag, message.message_id))
         
-        logger.info(f"Stored OTP message for number {number}")
+        logger.info(f"Stored OTP message for number {number} with OTP: {otp_code}")
+        
+        # Try to process immediately for faster response
+        try:
+            assignment = db.fetchone('''SELECT user_id FROM number_assignments 
+                                        WHERE number = ? AND is_active = 1''', (number,))
+            
+            if assignment:
+                user_id = assignment['user_id']
+                logger.info(f"Found assignment for user {user_id}")
+                
+                # Format and send message
+                formatted_msg, otp_code, flag, country = format_otp_message(
+                    number, text, timestamp, False, get_user_balance(user_id)
+                )
+                
+                markup = types.InlineKeyboardMarkup()
+                thanks_btn = types.InlineKeyboardButton("🌺 Thanks For Using Our Bot", callback_data="thanks")
+                markup.add(thanks_btn)
+                
+                # Send to user
+                try:
+                    bot.send_message(user_id, formatted_msg, reply_markup=markup, parse_mode='Markdown')
+                    
+                    # Increment message count
+                    increment_user_message_count(user_id)
+                    
+                    # Add revenue
+                    revenue = get_setting('revenue_per_message') or 0.005
+                    if revenue:
+                        add_revenue_to_user(user_id, revenue)
+                        
+                        # Update assignment stats
+                        db.execute('''UPDATE number_assignments 
+                                      SET otp_count = otp_count + 1, 
+                                          total_revenue = total_revenue + ?,
+                                          last_otp_date = ?
+                                      WHERE number = ? AND user_id = ?''',
+                                   (revenue, timestamp, number, user_id))
+                    
+                    # Mark as processed
+                    db.execute('''UPDATE otp_messages 
+                                  SET forwarded_to = ?, revenue_added = 1, processed = 1 
+                                  WHERE message_id = ?''', (user_id, message.message_id))
+                    
+                    logger.info(f"Forwarded OTP to user {user_id}")
+                    
+                    # Try to delete from group
+                    try:
+                        if MONITORED_GROUP_ID:
+                            bot.delete_message(MONITORED_GROUP_ID, message.message_id)
+                            logger.info(f"Deleted message {message.message_id} from group")
+                    except Exception as e:
+                        logger.error(f"Could not delete message from group: {e}")
+                        
+                except Exception as e:
+                    logger.error(f"Error sending to user {user_id}: {e}")
+            else:
+                logger.info(f"No active assignment found for number {number}")
+                
+        except Exception as e:
+            logger.error(f"Error in immediate processing: {e}")
+            logger.error(traceback.format_exc())
         
     except Exception as e:
         logger.error(f"Error processing group message: {e}")
+        logger.error(traceback.format_exc())
 
 # Admin commands
 @bot.message_handler(commands=['panel'])
@@ -2595,6 +2764,11 @@ if __name__ == "__main__":
     print(f"📊 Monitoring group: {MONITORED_GROUP_ID}")
     print(f"👑 Admins: {ADMIN_IDS}")
     print(f"🔗 OTP Group: {OTP_GROUP_LINK}")
+    print("✅ All features enabled:")
+    print("   - OTP detection from all bot messages in group")
+    print("   - Individual tap-to-copy for each number")
+    print("   - Enhanced regex patterns for number extraction")
+    print("   - Real-time message processing")
     
     try:
         bot.infinity_polling(timeout=60, long_polling_timeout=30)
