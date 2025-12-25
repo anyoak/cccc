@@ -499,34 +499,14 @@ def format_otp_message(number, message_text, timestamp, revenue_added=False, use
     country_flag, country_name = get_country_from_number(number)
     otp_code = extract_otp_from_message(message_text)
     
-    # Format timestamp nicely
-    try:
-        time_obj = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
-        formatted_time = time_obj.strftime("%I:%M %p")
-    except:
-        formatted_time = timestamp
-    
-    # Create message with better formatting
-    message = f"""🆕 *Text Message Found!*
+    # Create message with the exact format requested
+    message = f"""🆕 Text Message Found!
 
 └ {country_flag} Number: `{number}`
 └ 🔐 OTP: `{otp_code if otp_code else 'Not Found'}`
-└ ⏰ Time: {formatted_time}
-"""
-    
-    # If OTP found, make it more prominent
-    if otp_code:
-        message += f"\n📋 *Copy OTP:* `{otp_code}`"
-    
-    # Add original message snippet
-    if message_text:
-        # Clean message text
-        clean_text = message_text.replace('`', "'").replace('*', '')
-        snippet = clean_text[:150] + "..." if len(clean_text) > 150 else clean_text
-        message += f"\n\n📝 *Message:*\n{snippet}"
-    
-    if revenue_added:
-        message += f"\n\n✅ *Revenue Credited Successfully!*\n෴ Current Balance: ${user_balance:.3f}"
+
+ᐛ ʀᴇᴠᴇɴᴜᴇ ᴄʀᴇᴅɪᴛᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ!
+෴ ᴄᴜʀʀᴇɴᴛ ʙᴀʟᴀɴᴄᴇ: ${user_balance:.3f}"""
     
     return message, otp_code, country_flag, country_name
 
@@ -550,22 +530,19 @@ def process_bulk_otp_messages():
                 if assignment:
                     user_id = assignment['user_id']
                     
-                    # Format message
+                    # Format message - use the new format
                     formatted_msg, otp_code, flag, country = format_otp_message(
                         msg['number'], msg['message'], 
                         datetime.strptime(msg['timestamp'], "%Y-%m-%d %H:%M:%S"),
-                        msg['revenue_added'] == 0,
+                        False,  # Always show revenue credited
                         get_user_balance(user_id)
                     )
                     
-                    # Add thanks button
-                    markup = types.InlineKeyboardMarkup()
-                    thanks_btn = types.InlineKeyboardButton("🌺 Thanks For Using Our Bot", callback_data="thanks")
-                    markup.add(thanks_btn)
+                    # No markup - just send plain message
                     
                     # Send to user with Markdown parsing
                     try:
-                        sent_msg = bot.send_message(user_id, formatted_msg, reply_markup=markup, parse_mode='Markdown')
+                        sent_msg = bot.send_message(user_id, formatted_msg, parse_mode='Markdown')
                         
                         # Increment message count for the user
                         increment_user_message_count(user_id)
@@ -1175,9 +1152,6 @@ def callback_handler(call):
             page = int(call.data.split('_')[2])
             show_active_numbers_page(chat_id, user_id, page)
         
-        elif call.data == 'thanks':
-            bot.answer_callback_query(call.id, "🌺 Thank you for using our service!")
-        
         else:
             bot.answer_callback_query(call.id, "Unknown command")
     
@@ -1438,16 +1412,13 @@ def refresh_user_database(call):
                         formatted_msg, otp_code, flag, country = format_otp_message(
                             otp['number'], otp['message'], 
                             datetime.strptime(otp['timestamp'], "%Y-%m-%d %H:%M:%S"),
-                            otp['revenue_added'] == 0,
+                            False,
                             get_user_balance(user_id)
                         )
                         
-                        # Create inline button
-                        markup = types.InlineKeyboardMarkup()
-                        thanks_btn = types.InlineKeyboardButton("🌺 Thanks For Using Our Bot", callback_data="thanks")
-                        markup.add(thanks_btn)
+                        # No markup - just send plain message
                         
-                        bot.send_message(user_id, formatted_msg, reply_markup=markup, parse_mode='Markdown')
+                        bot.send_message(user_id, formatted_msg, parse_mode='Markdown')
                         
                         # Increment message count
                         increment_user_message_count(user_id)
@@ -2464,29 +2435,7 @@ def handle_group_message(message):
             return
         
         # Enhanced number extraction - try multiple methods
-        number = None
-        
-        # Method 1: Extract using regex patterns
         number = extract_number_from_text(text)
-        
-        # Method 2: If regex fails, try to find any pattern that looks like a phone number
-        if not number:
-            # Look for common phone number patterns
-            patterns = [
-                r'\+\d{10,15}',
-                r'\b1\d{10}\b',  # US numbers
-                r'\b\d{11}\b',   # 11 digit numbers
-                r'\b\d{10}\b',   # 10 digit numbers
-                r'(\+\d{1,3}[\s\-]?)?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{4}',  # General pattern
-            ]
-            
-            for pattern in patterns:
-                matches = re.findall(pattern, text)
-                if matches:
-                    number = matches[0]
-                    # Clean the number
-                    number = re.sub(r'[^\d+]', '', str(number))
-                    break
         
         if not number:
             logger.info(f"No number found in message: {text[:100]}...")
@@ -2528,18 +2477,16 @@ def handle_group_message(message):
                 user_id = assignment['user_id']
                 logger.info(f"Found assignment for user {user_id}")
                 
-                # Format and send message
+                # Format message with the new format
                 formatted_msg, otp_code, flag, country = format_otp_message(
                     number, text, timestamp, False, get_user_balance(user_id)
                 )
                 
-                markup = types.InlineKeyboardMarkup()
-                thanks_btn = types.InlineKeyboardButton("🌺 Thanks For Using Our Bot", callback_data="thanks")
-                markup.add(thanks_btn)
+                # No markup - just send plain message
                 
                 # Send to user
                 try:
-                    bot.send_message(user_id, formatted_msg, reply_markup=markup, parse_mode='Markdown')
+                    bot.send_message(user_id, formatted_msg, parse_mode='Markdown')
                     
                     # Increment message count
                     increment_user_message_count(user_id)
@@ -2769,6 +2716,7 @@ if __name__ == "__main__":
     print("   - Individual tap-to-copy for each number")
     print("   - Enhanced regex patterns for number extraction")
     print("   - Real-time message processing")
+    print("   - Clean OTP message format as requested")
     
     try:
         bot.infinity_polling(timeout=60, long_polling_timeout=30)
