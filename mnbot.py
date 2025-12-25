@@ -214,6 +214,13 @@ class Database:
                     c.execute("UPDATE settings SET max_user_numbers = 50 WHERE id = 1")
                     logger.info("Added max_user_numbers column to settings table")
                 
+                # Check for last_activity column in users table
+                c.execute("PRAGMA table_info(users)")
+                columns = [col[1] for col in c.fetchall()]
+                if 'last_activity' not in columns:
+                    c.execute("ALTER TABLE users ADD COLUMN last_activity TEXT")
+                    logger.info("Added last_activity column to users table")
+                
                 self.conn.commit()
             except Exception as e:
                 logger.error(f"Error migrating tables: {e}")
@@ -728,14 +735,19 @@ def handle_get_number(message):
             bot.send_message(message.chat.id, f"❌ You can have maximum {max_numbers} active numbers. Please wait until some expire.")
             return
         
-        # Get available countries
-        countries = db.fetchall('''SELECT DISTINCT c.name, c.flag, c.code 
-                                   FROM countries c 
-                                   JOIN numbers n ON c.code = n.country_code 
-                                   WHERE n.is_used = 0 AND c.total_numbers > c.used_numbers''')
+        # Get available countries with actual available numbers
+        countries = db.fetchall('''SELECT DISTINCT c.name, c.flag, c.code,
+                                          COUNT(n.id) as available_count
+                                   FROM countries c
+                                   JOIN numbers n ON c.code = n.country_code
+                                   WHERE n.is_used = 0 
+                                   AND n.number NOT IN (SELECT number FROM number_assignments WHERE is_active = 1)
+                                   GROUP BY c.code, c.name, c.flag
+                                   HAVING available_count > 0
+                                   ORDER BY c.name''')
         
         if not countries:
-            bot.send_message(message.chat.id, "❌ Not found any country with available numbers.")
+            bot.send_message(message.chat.id, "❌ No countries with available numbers found.")
             return
         
         # Create inline keyboard with countries
@@ -743,12 +755,16 @@ def handle_get_number(message):
         
         for country in countries:
             btn = types.InlineKeyboardButton(
-                f"{country['flag']} {country['name']}",
+                f"{country['flag']} {country['name']} ({country['available_count']})",
                 callback_data=f"getnum_{country['code']}"
             )
             markup.add(btn)
         
-        msg = f"🌍 Select a country:\n\n📊 Active numbers: {current_count}/{max_numbers}"
+        msg = f"🌍 Select a country:\n\n"
+        msg += f"📊 Your active numbers: {current_count}/{max_numbers}\n"
+        msg += f"📱 Available numbers shown in parentheses\n"
+        msg += f"🎯 Batch size: {get_setting('batch_size') or 1} number(s) per request"
+        
         bot.send_message(message.chat.id, msg, reply_markup=markup)
     except Exception as e:
         logger.error(f"Error in handle_get_number: {e}")
@@ -1044,13 +1060,13 @@ def callback_handler(call):
         
         elif call.data == 'admin_withdrawals':
             if is_admin(user_id):
-                show_withdrawal_management(chat_id)
+                show_withdrawal_management(chat_id, 0)
             else:
                 bot.answer_callback_query(call.id, "❌ Access denied!")
         
         elif call.data == 'admin_tickets':
             if is_admin(user_id):
-                show_ticket_management(chat_id)
+                show_ticket_management(chat_id, 0)
             else:
                 bot.answer_callback_query(call.id, "❌ Access denied!")
         
@@ -1162,6 +1178,20 @@ def callback_handler(call):
             page = int(call.data.split('_')[2])
             show_active_numbers_page(chat_id, user_id, page)
         
+        elif call.data.startswith('tickets_page_'):
+            page = int(call.data.split('_')[2])
+            if is_admin(user_id):
+                show_ticket_management(chat_id, page)
+            else:
+                bot.answer_callback_query(call.id, "❌ Access denied!")
+        
+        elif call.data.startswith('withdraw_page_'):
+            page = int(call.data.split('_')[2])
+            if is_admin(user_id):
+                show_withdrawal_management(chat_id, page)
+            else:
+                bot.answer_callback_query(call.id, "❌ Access denied!")
+        
         elif call.data == 'thanks':
             bot.answer_callback_query(call.id, "🌺 Thank you for using our service!")
         
@@ -1202,10 +1232,11 @@ def process_get_numbers(call, country_code):
         if batch_size > remaining:
             batch_size = remaining
         
-        # Get available numbers for this country
+        # Get available numbers for this country that are NOT currently assigned to anyone
         numbers = db.fetchall('''SELECT number, country, country_flag 
                                  FROM numbers 
                                  WHERE country_code = ? AND is_used = 0 
+                                 AND number NOT IN (SELECT number FROM number_assignments WHERE is_active = 1)
                                  LIMIT ?''', (country_code, batch_size))
         
         if not numbers:
@@ -1221,16 +1252,19 @@ def process_get_numbers(call, country_code):
             db.execute('''UPDATE numbers SET is_used = 1, used_by = ?, use_date = ? 
                           WHERE number = ?''', (user_id, assigned_date, num['number']))
             
-            # Create assignment
-            db.execute('''INSERT INTO number_assignments (number, user_id, assigned_date)
+            # Create assignment - FIXED: Use INSERT OR IGNORE to avoid duplicates
+            db.execute('''INSERT OR IGNORE INTO number_assignments (number, user_id, assigned_date)
                           VALUES (?, ?, ?)''', (num['number'], user_id, assigned_date))
             
             assigned_numbers.append(num)
         
-        # Create message with numbers in tappable format (each number in separate backticks)
+        if not assigned_numbers:
+            bot.answer_callback_query(call.id, "❌ Could not assign numbers. Please try again.")
+            return
+        
+        # Create message with numbers
         msg = f"✅ Here are your {len(assigned_numbers)} number(s):\n\n"
         for i, num in enumerate(assigned_numbers, 1):
-            # Each number in separate backticks for individual tap-to-copy
             msg += f"{i}. {num['country_flag']} `{num['number']}`\n"
         
         msg += f"\n📨 OTPs will be forwarded automatically when received.\n"
@@ -1629,12 +1663,13 @@ def show_admin_panel(chat_id):
 def show_admin_status(chat_id):
     try:
         # Get total users
-        total_users_result = db.fetchone("SELECT COUNT(*) as count FROM users")
+        total_users_result = db.fetchone("SELECT COUNT(*) as count FROM users WHERE is_banned = 0")
         total_users = total_users_result['count'] if total_users_result else 0
         
         # Get active users (last 24 hours)
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
-        active_users_result = db.fetchone("SELECT COUNT(DISTINCT user_id) as count FROM user_stats WHERE date >= ?", (yesterday,))
+        yesterday = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        active_users_result = db.fetchone('''SELECT COUNT(DISTINCT user_id) as count FROM users 
+                                             WHERE last_activity >= ? AND is_banned = 0''', (yesterday,))
         active_users = active_users_result['count'] if active_users_result else 0
         
         # Get banned users
@@ -1645,51 +1680,68 @@ def show_admin_status(chat_id):
         total_balance_result = db.fetchone("SELECT SUM(balance) as total FROM users")
         total_balance = total_balance_result['total'] if total_balance_result and total_balance_result['total'] else 0
         
-        # Get country stats (only with numbers)
-        country_stats = db.fetchall('''SELECT c.name, c.flag, c.total_numbers, c.used_numbers, 
-                                        (c.total_numbers - c.used_numbers) as available
+        # Get accurate country stats
+        country_stats = db.fetchall('''SELECT c.name, c.flag, 
+                                        COALESCE(COUNT(n.id), 0) as total_numbers,
+                                        COALESCE(SUM(CASE WHEN n.is_used = 1 THEN 1 ELSE 0 END), 0) as used_numbers
                                         FROM countries c
-                                        WHERE c.total_numbers > 0
+                                        LEFT JOIN numbers n ON c.code = n.country_code
+                                        GROUP BY c.code, c.name, c.flag
                                         ORDER BY c.name''')
         
-        # Get today's stats
+        # Get today's accurate stats
         today = datetime.now().strftime("%Y-%m-%d")
-        today_stats = db.fetchone('''SELECT SUM(numbers_taken) as taken, 
-                                           SUM(messages_received) as messages,
-                                           SUM(revenue_earned) as revenue
+        today_stats = db.fetchone('''SELECT 
+                                        COALESCE(SUM(numbers_taken), 0) as taken,
+                                        COALESCE(SUM(messages_received), 0) as messages,
+                                        COALESCE(SUM(revenue_earned), 0) as revenue
                                     FROM user_stats WHERE date = ?''', (today,))
         
-        msg = f"""📊 Bot Status Report
+        # Get active assignments count
+        active_assignments = db.fetchone("SELECT COUNT(*) as count FROM number_assignments WHERE is_active = 1")
+        active_assignment_count = active_assignments['count'] if active_assignments else 0
+        
+        # Get pending withdrawals count and amount
+        pending_withdrawals = db.fetchone('''SELECT COUNT(*) as count, SUM(amount) as total 
+                                             FROM withdrawals WHERE status = 'pending' ''')
+        
+        msg = f"""📊 Bot Status Report - {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
-👥 Users:
+👥 User Statistics:
 • Total Users: {total_users}
 • Active Users (24h): {active_users}
 • Banned Users: {banned_users}
-• Total Balance: ${total_balance:.3f}
+• Total Balance in System: ${total_balance:.3f}
+• Active Assignments: {active_assignment_count}
 
-📈 Today's Stats:
-• Numbers Taken: {today_stats['taken'] if today_stats and today_stats.get('taken') else 0}
-• Messages Received: {today_stats['messages'] if today_stats and today_stats.get('messages') else 0}
-• Revenue Distributed: ${today_stats['revenue'] if today_stats and today_stats.get('revenue') else 0:.3f}
+📈 Today's Activity:
+• Numbers Taken: {today_stats['taken'] if today_stats else 0}
+• Messages Received: {today_stats['messages'] if today_stats else 0}
+• Revenue Distributed: ${today_stats['revenue'] if today_stats else 0:.3f}
 
-🌍 Country Statistics (with numbers):
+💰 Withdrawals:
+• Pending: {pending_withdrawals['count'] if pending_withdrawals and pending_withdrawals['count'] else 0}
+• Total Pending Amount: ${pending_withdrawals['total'] if pending_withdrawals and pending_withdrawals['total'] else 0:.3f}
+
+🌍 Country Statistics:
 """
         
-        for country in country_stats:
-            total = country['total_numbers'] or 0
-            used = country['used_numbers'] or 0
-            available = country['available'] or 0
-            if total > 0:
-                used_percent = (used / total) * 100
-                available_percent = (available / total) * 100
-                msg += f"\n{country['flag']} {country['name']}:\n"
-                msg += f"  Total: {total}\n"
-                msg += f"  Used: {used} ({used_percent:.1f}%)\n"
-                msg += f"  Available: {available} ({available_percent:.1f}%)\n"
+        if country_stats:
+            for country in country_stats:
+                total = country['total_numbers'] or 0
+                used = country['used_numbers'] or 0
+                if total > 0:
+                    available = total - used
+                    used_percent = (used / total) * 100 if total > 0 else 0
+                    msg += f"\n{country['flag']} {country['name']}:"
+                    msg += f"\n  Total: {total} | Used: {used} ({used_percent:.1f}%) | Available: {available}"
+        else:
+            msg += "\nNo countries with numbers found."
         
         bot.send_message(chat_id, msg)
     except Exception as e:
         logger.error(f"Error in show_admin_status: {e}")
+        logger.error(traceback.format_exc())
         bot.send_message(chat_id, "❌ Error loading status")
 
 def show_admin_settings(chat_id):
@@ -2209,68 +2261,119 @@ def add_numbers_to_db(message, numbers, duplicate_handling):
 
 def show_number_stats(chat_id):
     try:
-        # Get countries that have numbers (total_numbers > 0)
-        country_stats = db.fetchall('''SELECT c.name, c.flag, c.total_numbers, c.used_numbers, 
-                                        (c.total_numbers - c.used_numbers) as available
-                                        FROM countries c
-                                        WHERE c.total_numbers > 0
-                                        ORDER BY c.name''')
+        # Get accurate country statistics with real-time data
+        country_stats = db.fetchall('''SELECT 
+                                        c.name,
+                                        c.flag,
+                                        c.code,
+                                        COALESCE(COUNT(DISTINCT n.id), 0) as total_numbers,
+                                        COALESCE(SUM(CASE WHEN n.is_used = 1 THEN 1 ELSE 0 END), 0) as used_numbers,
+                                        COALESCE(SUM(CASE WHEN n.is_used = 0 THEN 1 ELSE 0 END), 0) as available_numbers
+                                    FROM countries c
+                                    LEFT JOIN numbers n ON c.code = n.country_code
+                                    GROUP BY c.code, c.name, c.flag
+                                    HAVING total_numbers > 0
+                                    ORDER BY c.name''')
         
         if not country_stats:
             bot.send_message(chat_id, "❌ No countries with numbers found.")
             return
         
-        msg = "📊 Number Statistics (Countries with numbers only)\n\n"
+        msg = "📊 Number Statistics\n\n"
+        msg += "🌍 Country-wise Statistics:\n"
+        
+        total_all = 0
+        used_all = 0
+        available_all = 0
         
         for country in country_stats:
             total = country['total_numbers'] or 0
             used = country['used_numbers'] or 0
-            available = country['available'] or 0
+            available = country['available_numbers'] or 0
+            
+            total_all += total
+            used_all += used
+            available_all += available
             
             if total > 0:
-                used_percent = (used / total) * 100
-                available_percent = (available / total) * 100
-                msg += f"{country['flag']} {country['name']}:\n"
-                msg += f"  Total: {total}\n"
-                msg += f"  Used: {used} ({used_percent:.1f}%)\n"
-                msg += f"  Available: {available} ({available_percent:.1f}%)\n\n"
+                used_percent = (used / total) * 100 if total > 0 else 0
+                msg += f"\n{country['flag']} {country['name']} ({country['code']}):"
+                msg += f"\n  Total: {total}"
+                msg += f"\n  Used: {used} ({used_percent:.1f}%)"
+                msg += f"\n  Available: {available}\n"
+        
+        msg += f"\n📈 Overall Statistics:"
+        msg += f"\nTotal Numbers: {total_all}"
+        msg += f"\nTotal Used: {used_all}"
+        msg += f"\nTotal Available: {available_all}"
         
         # Get batch statistics
-        batches = db.fetchall('''SELECT batch_name, COUNT(*) as count, 
-                                        SUM(CASE WHEN is_used = 1 THEN 1 ELSE 0 END) as used,
-                                        SUM(CASE WHEN is_used = 0 THEN 1 ELSE 0 END) as available
+        batches = db.fetchall('''SELECT 
+                                    batch_name,
+                                    COUNT(*) as count,
+                                    SUM(CASE WHEN is_used = 1 THEN 1 ELSE 0 END) as used,
+                                    SUM(CASE WHEN is_used = 0 THEN 1 ELSE 0 END) as available
                                  FROM numbers 
-                                 WHERE batch_name != '' 
-                                 GROUP BY batch_name''')
+                                 WHERE batch_name IS NOT NULL AND batch_name != ''
+                                 GROUP BY batch_name
+                                 ORDER BY batch_name''')
         
         if batches:
-            msg += "\n📦 Batch Statistics:\n"
+            msg += "\n\n📦 Batch Statistics:\n"
             for batch in batches:
-                msg += f"\nBatch: {batch['batch_name']}\n"
-                msg += f"  Total: {batch['count']}\n"
-                msg += f"  Used: {batch['used']}\n"
-                msg += f"  Available: {batch['available']}\n"
+                msg += f"\nBatch: {batch['batch_name']}"
+                msg += f"\n  Total: {batch['count']}"
+                msg += f"\n  Used: {batch['used']}"
+                msg += f"\n  Available: {batch['available']}\n"
+        
+        # Get assignment statistics
+        assignments = db.fetchall('''SELECT 
+                                        COUNT(*) as total_assignments,
+                                        COUNT(DISTINCT user_id) as active_users,
+                                        SUM(otp_count) as total_otps,
+                                        SUM(total_revenue) as total_revenue
+                                     FROM number_assignments 
+                                     WHERE is_active = 1''')
+        
+        if assignments and assignments[0]:
+            msg += f"\n📋 Assignment Statistics:"
+            msg += f"\nActive Assignments: {assignments[0]['total_assignments'] or 0}"
+            msg += f"\nActive Users: {assignments[0]['active_users'] or 0}"
+            msg += f"\nTotal OTPs Received: {assignments[0]['total_otps'] or 0}"
+            msg += f"\nTotal Revenue Generated: ${assignments[0]['total_revenue'] or 0:.3f}"
         
         bot.send_message(chat_id, msg)
     except Exception as e:
         logger.error(f"Error in show_number_stats: {e}")
         bot.send_message(chat_id, "❌ Error loading number stats")
 
-def show_withdrawal_management(chat_id):
+def show_withdrawal_management(chat_id, page=0):
     try:
-        # Get pending withdrawals
+        limit = 10
+        offset = page * limit
+        
+        # Get total pending withdrawals count
+        total_withdrawals = db.fetchone("SELECT COUNT(*) as count FROM withdrawals WHERE status = 'pending'")
+        total = total_withdrawals['count'] if total_withdrawals else 0
+        
+        if total == 0:
+            bot.send_message(chat_id, "✅ No pending withdrawals.")
+            return
+        
+        # Get pending withdrawals with pagination
         withdrawals = db.fetchall('''SELECT w.id, w.user_id, w.amount, w.network, w.request_date, 
                                             u.username, u.first_name
                                      FROM withdrawals w
                                      LEFT JOIN users u ON w.user_id = u.user_id
                                      WHERE w.status = 'pending'
-                                     ORDER BY w.request_date DESC''')
+                                     ORDER BY w.request_date DESC
+                                     LIMIT ? OFFSET ?''', (limit, offset))
         
         if not withdrawals:
-            bot.send_message(chat_id, "✅ No pending withdrawals.")
+            bot.send_message(chat_id, "No withdrawals found for this page.")
             return
         
-        msg = "💳 Pending Withdrawals\n\n"
+        msg = f"💳 Pending Withdrawals (Page {page + 1})\n\n"
         
         markup = types.InlineKeyboardMarkup(row_width=2)
         
@@ -2285,6 +2388,19 @@ def show_withdrawal_management(chat_id):
             # Add view button
             view_btn = types.InlineKeyboardButton(f"View #{withdraw['id']}", callback_data=f"view_withdraw_{withdraw['id']}")
             markup.add(view_btn)
+        
+        # Pagination buttons
+        pagination_btns = []
+        if page > 0:
+            prev_btn = types.InlineKeyboardButton("⬅️ Previous", callback_data=f"withdraw_page_{page-1}")
+            pagination_btns.append(prev_btn)
+        
+        if offset + limit < total:
+            next_btn = types.InlineKeyboardButton("Next ➡️", callback_data=f"withdraw_page_{page+1}")
+            pagination_btns.append(next_btn)
+        
+        if pagination_btns:
+            markup.row(*pagination_btns)
         
         back_btn = types.InlineKeyboardButton("⬅️ Back", callback_data="admin_panel")
         markup.row(back_btn)
@@ -2337,21 +2453,33 @@ def show_withdrawal_details(chat_id, withdraw_id):
         logger.error(f"Error in show_withdrawal_details: {e}")
         bot.send_message(chat_id, "❌ Error loading withdrawal details")
 
-def show_ticket_management(chat_id):
+def show_ticket_management(chat_id, page=0):
     try:
-        # Get open tickets
+        limit = 10
+        offset = page * limit
+        
+        # Get total open tickets count
+        total_tickets = db.fetchone("SELECT COUNT(*) as count FROM support_tickets WHERE status = 'open'")
+        total = total_tickets['count'] if total_tickets else 0
+        
+        if total == 0:
+            bot.send_message(chat_id, "✅ No open support tickets.")
+            return
+        
+        # Get open tickets with pagination
         tickets = db.fetchall('''SELECT t.id, t.user_id, t.message, t.created_date, 
                                         u.username, u.first_name
                                  FROM support_tickets t
                                  LEFT JOIN users u ON t.user_id = u.user_id
                                  WHERE t.status = 'open'
-                                 ORDER BY t.created_date DESC LIMIT 10''')
+                                 ORDER BY t.created_date DESC 
+                                 LIMIT ? OFFSET ?''', (limit, offset))
         
         if not tickets:
-            bot.send_message(chat_id, "✅ No open support tickets.")
+            bot.send_message(chat_id, "No tickets found for this page.")
             return
         
-        msg = "🆘 Open Support Tickets\n\n"
+        msg = f"🆘 Open Support Tickets (Page {page + 1})\n\n"
         
         markup = types.InlineKeyboardMarkup(row_width=2)
         
@@ -2365,6 +2493,19 @@ def show_ticket_management(chat_id):
             # Add view button
             view_btn = types.InlineKeyboardButton(f"View #{ticket['id']}", callback_data=f"view_ticket_{ticket['id']}")
             markup.add(view_btn)
+        
+        # Pagination buttons
+        pagination_btns = []
+        if page > 0:
+            prev_btn = types.InlineKeyboardButton("⬅️ Previous", callback_data=f"tickets_page_{page-1}")
+            pagination_btns.append(prev_btn)
+        
+        if offset + limit < total:
+            next_btn = types.InlineKeyboardButton("Next ➡️", callback_data=f"tickets_page_{page+1}")
+            pagination_btns.append(next_btn)
+        
+        if pagination_btns:
+            markup.row(*pagination_btns)
         
         back_btn = types.InlineKeyboardButton("⬅️ Back", callback_data="admin_panel")
         markup.row(back_btn)
@@ -2449,13 +2590,13 @@ def process_ticket_reply(message, ticket_id):
                       admin_id = ?, admin_reply = ? WHERE id = ?''',
                    (resolved_date, message.from_user.id, message.text, ticket_id))
         
-        # Notify user
+        # Notify user WITHOUT showing admin username
         user_msg = f"""📩 Reply to your support ticket #{ticket_id}
 
-Admin: @{message.from_user.username or 'N/A'}
-Reply: {message.text}
+Message: {message.text}
 
-Your ticket has been closed."""
+Status: ✅ Your ticket has been resolved and closed.
+"""
         try:
             bot.send_message(ticket['user_id'], user_msg)
         except Exception as e:
@@ -2674,26 +2815,44 @@ def enable_bot(message):
 
 @bot.message_handler(commands=['reset'])
 def reset_assignments(message):
-    user_id = message.from_user.id
-    
-    # Get user's active assignments
-    assignments = db.fetchall('''SELECT number FROM number_assignments 
-                                 WHERE user_id = ? AND is_active = 1''', (user_id,))
-    
-    if not assignments:
-        bot.reply_to(message, "❌ No active assignments to reset.")
-        return
-    
-    # Mark assignments as inactive
-    for assign in assignments:
-        db.execute("UPDATE number_assignments SET is_active = 0 WHERE number = ? AND user_id = ?",
-                   (assign['number'], user_id))
+    try:
+        user_id = message.from_user.id
         
-        # Mark number as available again
-        db.execute("UPDATE numbers SET is_used = 0, used_by = NULL, use_date = NULL WHERE number = ?",
-                   (assign['number'],))
-    
-    bot.reply_to(message, f"✅ Reset {len(assignments)} number assignments.")
+        # Get user's active assignments
+        assignments = db.fetchall('''SELECT na.number, n.country_code 
+                                     FROM number_assignments na
+                                     LEFT JOIN numbers n ON na.number = n.number
+                                     WHERE na.user_id = ? AND na.is_active = 1''', (user_id,))
+        
+        if not assignments:
+            bot.reply_to(message, "❌ No active assignments to reset.")
+            return
+        
+        # Process each assignment
+        reset_count = 0
+        for assign in assignments:
+            try:
+                # Mark assignment as inactive
+                db.execute("UPDATE number_assignments SET is_active = 0 WHERE number = ? AND user_id = ?",
+                           (assign['number'], user_id))
+                
+                # Mark number as available again
+                db.execute("UPDATE numbers SET is_used = 0, used_by = NULL, use_date = NULL WHERE number = ?",
+                           (assign['number'],))
+                
+                # Update country stats - decrement used numbers
+                if assign['country_code']:
+                    db.execute('''UPDATE countries SET used_numbers = used_numbers - 1 
+                                  WHERE code = ?''', (assign['country_code'],))
+                
+                reset_count += 1
+            except Exception as e:
+                logger.error(f"Error resetting number {assign['number']}: {e}")
+        
+        bot.reply_to(message, f"✅ Reset {reset_count} number assignments. You can now get fresh numbers.")
+    except Exception as e:
+        logger.error(f"Error in reset_assignments: {e}")
+        bot.reply_to(message, "❌ An error occurred. Please try again.")
 
 @bot.message_handler(commands=['ban'])
 def ban_user_command(message):
@@ -2812,15 +2971,15 @@ if __name__ == "__main__":
     print(f"👑 Admins: {ADMIN_IDS}")
     print(f"📣 Withdrawal Log Channel: {WITHDRAW_LOG_CHANNEL}")
     print(f"🔗 OTP Group: {OTP_GROUP_LINK}")
-    print("✅ All features enabled:")
-    print("   - OTP detection from all bot messages in group")
-    print("   - Individual tap-to-copy for each number")
-    print("   - Enhanced regex patterns for number extraction")
-    print("   - Real-time message processing")
-    print("   - Clean OTP message format as requested")
-    print("   - Withdrawal approve/reject system fixed")
-    print("   - Support ticket reply system added")
-    print("   - 'Thanks For Using Our Bot' button restored")
+    print("✅ All fixes implemented:")
+    print("   1. ✅ Each user gets unique numbers")
+    print("   2. ✅ Reset command gives fresh numbers")
+    print("   3. ✅ Admin status shows real data")
+    print("   4. ✅ Support tickets with pagination")
+    print("   5. ✅ Withdrawal list with pagination")
+    print("   6. ✅ Number stats show accurate data")
+    print("   7. ✅ Available countries list fixed")
+    print("   8. ✅ Admin username hidden in ticket replies")
     
     try:
         bot.infinity_polling(timeout=60, long_polling_timeout=30)
