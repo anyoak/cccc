@@ -27,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot configuration
-API_TOKEN = "8594038929:AAGJICJfhWCUjBec9i_41E6ibVphGEo0nUA"
+API_TOKEN = "8490533685:AAFqWp8cLxzkLIzRdILWn8UQsngURibH29A"
 ADMIN_IDS = [6577308099, 5878787791]
 MONITORED_GROUP_ID = -1003437559135  # OTP/Message group
 WITHDRAW_LOG_CHANNEL = -1003492385395  # Withdrawal log channel
@@ -450,40 +450,51 @@ def extract_otp_from_message(text):
     return None
 
 def extract_number_from_text(text):
-    """Extract phone number from text - enhanced for all formats"""
+    """Extract phone number from text - enhanced for all international formats"""
     if not text:
         return None
     
-    # Clean text
-    text = str(text).replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+    text = str(text).strip()
     
-    # Multiple patterns for different formats
+    # Comprehensive patterns for international phone numbers
     patterns = [
-        r'\+\d{10,15}',  # International format
-        r'\b1\d{10}\b',  # US numbers starting with 1
-        r'\b\d{11}\b',   # 11 digit numbers
-        r'\b\d{10}\b',   # 10 digit numbers
-        r'\b\d{12,15}\b', # Longer numbers
-        r'tel[:=]?(\+\d+)',  # tel: links
-        r'phone[:=]?(\+\d+)', # phone: links
+        r'\+\d{1,4}[-.\s]?\d{1,14}(?:[-.\s]?\d{1,13})?',  # International format with separators
+        r'\b\d{10,15}\b',                                   # Long digit sequences
+        r'(?:\+?\d{1,4}[-.\s]?)?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9}',  # Various national formats
+        r'tel[:=]?[\s]*([+\d][\d\s\-\(\)\.]+)',            # tel: links
+        r'phone[:=]?[\s]*([+\d][\d\s\-\(\)\.]+)',          # phone: links
+        r'mobile[:=]?[\s]*([+\d][\d\s\-\(\)\.]+)',         # mobile: links
     ]
     
     for pattern in patterns:
-        matches = re.findall(pattern, text)
-        if matches:
-            # Clean the number
-            number = matches[0]
-            # Ensure it starts with +
-            if not number.startswith('+') and len(number) >= 10:
-                # Try to add country code
-                if number.startswith('1') and len(number) == 11:
-                    number = '+' + number
-                elif len(number) == 10:
-                    # Default to US
-                    number = '+1' + number
-                else:
-                    number = '+' + number
-            return number
+        try:
+            matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if matches:
+                for match in matches:
+                    if isinstance(match, tuple):
+                        match = match[0]
+                    # Clean the number: keep only digits and +
+                    cleaned = re.sub(r'[^\d+]', '', match)
+                    if cleaned and len(cleaned) >= 10:
+                        # Ensure it starts with + for international numbers
+                        if not cleaned.startswith('+') and len(cleaned) >= 10:
+                            # Common country code patterns
+                            if cleaned.startswith('1') and len(cleaned) == 11:
+                                cleaned = '+' + cleaned  # US/Canada
+                            elif cleaned.startswith('44') and len(cleaned) >= 10:
+                                cleaned = '+' + cleaned  # UK
+                            elif cleaned.startswith('91') and len(cleaned) >= 10:
+                                cleaned = '+' + cleaned  # India
+                            elif cleaned.startswith('61') and len(cleaned) >= 10:
+                                cleaned = '+' + cleaned  # Australia
+                            else:
+                                # Default: assume it's international without +
+                                if len(cleaned) >= 10:
+                                    cleaned = '+' + cleaned
+                        return cleaned
+        except Exception as e:
+            logger.error(f"Error in pattern {pattern}: {e}")
+            continue
     
     return None
 
@@ -1113,23 +1124,35 @@ def callback_handler(call):
             else:
                 bot.answer_callback_query(call.id, "❌ Access denied!")
         
-        elif call.data == 'reset_all_assignments':
+        elif call.data == 'reset_delete_used':
             if is_admin(user_id):
-                show_reset_all_assignments(chat_id)
+                reset_delete_used_numbers(chat_id)
+            else:
+                bot.answer_callback_query(call.id, "❌ Access denied!")
+        
+        elif call.data == 'reset_confirm_delete_used':
+            if is_admin(user_id):
+                reset_confirm_delete_used(call)
             else:
                 bot.answer_callback_query(call.id, "❌ Access denied!")
         
         elif call.data.startswith('reset_country_'):
             country_code = call.data.split('_')[2]
             if is_admin(user_id):
-                confirm_reset_assignments(call, country_code)
+                show_reset_country_confirmation(call, country_code)
             else:
                 bot.answer_callback_query(call.id, "❌ Access denied!")
         
-        elif call.data.startswith('confirm_reset_'):
-            country_code = call.data.split('_')[2]
+        elif call.data.startswith('confirm_reset_country_'):
+            country_code = call.data.split('_')[3]
             if is_admin(user_id):
-                reset_assignments_for_country(call, country_code)
+                reset_all_assignments_for_country(call, country_code)
+            else:
+                bot.answer_callback_query(call.id, "❌ Access denied!")
+        
+        elif call.data == 'reset_all_assignments':
+            if is_admin(user_id):
+                show_reset_country_selection(chat_id)
             else:
                 bot.answer_callback_query(call.id, "❌ Access denied!")
         
@@ -1175,7 +1198,7 @@ def callback_handler(call):
         
         elif call.data == 'add_numbers':
             if is_admin(user_id):
-                ask_for_batch_name(chat_id)
+                ask_for_filename(chat_id)
             else:
                 bot.answer_callback_query(call.id, "❌ Access denied!")
         
@@ -1195,6 +1218,18 @@ def callback_handler(call):
             country_code = call.data.split('_')[2]
             if is_admin(user_id):
                 delete_country(chat_id, country_code)
+            else:
+                bot.answer_callback_query(call.id, "❌ Access denied!")
+        
+        elif call.data == 'skip_duplicates':
+            if is_admin(user_id):
+                process_numbers_with_skip(call)
+            else:
+                bot.answer_callback_query(call.id, "❌ Access denied!")
+        
+        elif call.data == 'overwrite_duplicates':
+            if is_admin(user_id):
+                process_numbers_with_overwrite(call)
             else:
                 bot.answer_callback_query(call.id, "❌ Access denied!")
         
@@ -2032,24 +2067,21 @@ def delete_country(chat_id, country_code):
         logger.error(f"Error in delete_country: {e}")
         bot.send_message(chat_id, "❌ Error deleting country")
 
-# New simplified number addition process
-def ask_for_batch_name(chat_id):
+def ask_for_filename(chat_id):
     try:
-        msg = """📁 Add Numbers
+        msg = """📁 Add Numbers - Step 1/3
 
-Step 1: Please send a name for this batch of numbers.
-This name will be displayed as the country name in the 'Get Number' menu.
-
-Example: 'USA Premium Numbers' or 'UK Virtual Numbers'
+Please send a name for this batch of numbers (e.g., 'US Numbers Batch 1'):
+This name will help you identify the batch later.
 
 Type /cancel to cancel."""
         
         bot.send_message(chat_id, msg)
-        bot.register_next_step_handler_by_chat_id(chat_id, process_batch_name)
+        bot.register_next_step_handler_by_chat_id(chat_id, process_filename)
     except Exception as e:
-        logger.error(f"Error in ask_for_batch_name: {e}")
+        logger.error(f"Error in ask_for_filename: {e}")
 
-def process_batch_name(message):
+def process_filename(message):
     try:
         if message.text == '/cancel':
             bot.send_message(message.chat.id, "Process cancelled.")
@@ -2061,25 +2093,24 @@ def process_batch_name(message):
         # Save batch name in message cache
         message_cache[message.chat.id] = {'batch_name': batch_name}
         
-        msg = """📁 Add Numbers - Step 2
+        msg = """📁 Add Numbers - Step 2/3
 
-Now please send the file containing phone numbers.
-Supported file formats:
-• .txt - One number per line
-• .csv - Numbers in any column
-• .json - Array of numbers
-• Any text file with phone numbers
+Now please send the file containing the numbers.
+Supported formats:
+• CSV (.csv) - One number per line or column
+• TXT (.txt) - One number per line
+• JSON (.json) - Array of numbers or objects with 'number' field
 
-The bot will automatically extract all phone numbers from the file.
+The bot will automatically extract phone numbers from the file.
 
 Type /cancel to cancel."""
         
         bot.send_message(message.chat.id, msg)
-        bot.register_next_step_handler(message, process_number_file)
+        bot.register_next_step_handler(message, process_number_file_upload)
     except Exception as e:
-        logger.error(f"Error in process_batch_name: {e}")
+        logger.error(f"Error in process_filename: {e}")
 
-def process_number_file(message):
+def process_number_file_upload(message):
     try:
         if message.text == '/cancel':
             bot.send_message(message.chat.id, "Process cancelled.")
@@ -2095,153 +2126,294 @@ def process_number_file(message):
         file_info = bot.get_file(message.document.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         
-        # Extract all phone numbers from the file
-        text = downloaded_file.decode('utf-8', errors='ignore')
+        # Parse file based on extension
+        filename = message.document.file_name.lower()
         
-        # Extract all phone numbers using regex
-        numbers = []
-        
-        # Pattern for international numbers
-        international_pattern = r'\+\d{10,15}'
-        international_matches = re.findall(international_pattern, text)
-        numbers.extend(international_matches)
-        
-        # Pattern for local numbers (10-15 digits)
-        local_pattern = r'\b\d{10,15}\b'
-        local_matches = re.findall(local_pattern, text)
-        
-        # Convert local numbers to international format if possible
-        for num in local_matches:
-            if len(num) == 10:
-                # Assume US number
-                numbers.append('+1' + num)
-            elif len(num) == 11 and num.startswith('1'):
-                numbers.append('+' + num)
-            else:
-                numbers.append('+' + num)
-        
-        # Remove duplicates
-        numbers = list(set(numbers))
+        if filename.endswith('.csv'):
+            numbers = parse_csv_file(downloaded_file)
+        elif filename.endswith('.txt'):
+            numbers = parse_txt_file(downloaded_file)
+        elif filename.endswith('.json'):
+            numbers = parse_json_file(downloaded_file)
+        else:
+            numbers = parse_txt_file(downloaded_file)
         
         if not numbers:
-            bot.reply_to(message, "❌ No phone numbers found in the file.")
+            bot.reply_to(message, "❌ No valid phone numbers found in the file.")
+            return
+        
+        # Clean and format numbers
+        cleaned_numbers = []
+        for number in numbers:
+            # Remove all non-digit characters except +
+            cleaned = re.sub(r'[^\d+]', '', number)
+            if cleaned and not cleaned.startswith('+'):
+                # Try to add + if it looks like an international number
+                if len(cleaned) >= 10:
+                    cleaned = '+' + cleaned
+            if cleaned and len(cleaned) >= 10:
+                cleaned_numbers.append(cleaned)
+        
+        if not cleaned_numbers:
+            bot.reply_to(message, "❌ No valid phone numbers found after cleaning.")
             return
         
         # Save numbers in cache
         if message.chat.id in message_cache:
-            message_cache[message.chat.id]['numbers'] = numbers
+            message_cache[message.chat.id]['numbers'] = cleaned_numbers
+            message_cache[message.chat.id]['filename'] = filename
         
-        # Process all numbers
-        process_all_numbers(message, numbers)
+        # Ask for duplicate handling
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        skip_btn = types.InlineKeyboardButton("Skip Duplicates", callback_data="skip_duplicates")
+        overwrite_btn = types.InlineKeyboardButton("Overwrite Duplicates", callback_data="overwrite_duplicates")
+        markup.add(skip_btn, overwrite_btn)
+        
+        bot.send_message(message.chat.id, 
+                         f"✅ Found {len(cleaned_numbers)} valid phone numbers in the file.\n\n"
+                         "How do you want to handle duplicate numbers?\n"
+                         "• Skip Duplicates: Only add new numbers\n"
+                         "• Overwrite Duplicates: Update existing numbers",
+                         reply_markup=markup)
         
     except Exception as e:
-        logger.error(f"Error in process_number_file: {e}")
+        logger.error(f"Error in process_number_file_upload: {e}")
         bot.reply_to(message, f"❌ Error: {str(e)}")
 
-def process_all_numbers(message, numbers):
+def parse_csv_file(content):
+    """Parse CSV file and extract ALL phone numbers"""
+    numbers = []
+    try:
+        # Try to decode as UTF-8
+        text = content.decode('utf-8', errors='ignore')
+        
+        # Use aggressive regex to find all potential phone numbers
+        # This pattern looks for any sequence that looks like a phone number
+        potential_numbers = re.findall(r'[\+\(]?[1-9][\d\-\.\s\(\)]{8,}[\d]', text)
+        
+        for num in potential_numbers:
+            extracted = extract_number_from_text(num)
+            if extracted:
+                numbers.append(extracted)
+        
+        # If no numbers found with the first pattern, try a simpler approach
+        if not numbers:
+            # Look for any sequence of 10+ digits
+            digit_sequences = re.findall(r'\d{10,}', text)
+            for seq in digit_sequences:
+                numbers.append('+' + seq if len(seq) >= 10 else None)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_numbers = []
+        for num in numbers:
+            if num and num not in seen:
+                seen.add(num)
+                unique_numbers.append(num)
+        
+        logger.info(f"Parsed {len(unique_numbers)} numbers from CSV")
+        return unique_numbers
+        
+    except Exception as e:
+        logger.error(f"Error parsing CSV: {e}")
+        return []
+
+def parse_txt_file(content):
+    """Parse TXT file and extract ALL phone numbers"""
+    numbers = []
+    try:
+        text = content.decode('utf-8', errors='ignore')
+        
+        # Split by lines and process each line
+        lines = text.split('\n')
+        for line in lines:
+            # Look for phone number patterns in each line
+            matches = re.findall(r'[\+\(]?[1-9][\d\-\.\s\(\)]{8,}[\d]', line)
+            for match in matches:
+                extracted = extract_number_from_text(match)
+                if extracted:
+                    numbers.append(extracted)
+        
+        # Fallback: extract all 10+ digit sequences
+        if not numbers:
+            digit_sequences = re.findall(r'\b\d{10,}\b', text)
+            for seq in digit_sequences:
+                if len(seq) >= 10:
+                    numbers.append('+' + seq)
+        
+        # Remove duplicates
+        seen = set()
+        unique_numbers = []
+        for num in numbers:
+            if num and num not in seen:
+                seen.add(num)
+                unique_numbers.append(num)
+        
+        logger.info(f"Parsed {len(unique_numbers)} numbers from TXT")
+        return unique_numbers
+        
+    except Exception as e:
+        logger.error(f"Error parsing TXT: {e}")
+        return []
+
+def parse_json_file(content):
+    numbers = []
+    try:
+        data = json.loads(content.decode('utf-8'))
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and 'number' in item:
+                    num = extract_number_from_text(str(item['number']))
+                    if num:
+                        numbers.append(num)
+                elif isinstance(item, str):
+                    num = extract_number_from_text(item)
+                    if num:
+                        numbers.append(num)
+    except:
+        pass
+    
+    return numbers
+
+def process_numbers_with_skip(call):
+    try:
+        chat_id = call.message.chat.id
+        
+        if chat_id not in message_cache or 'numbers' not in message_cache[chat_id]:
+            bot.answer_callback_query(call.id, "❌ No numbers found in cache!")
+            return
+        
+        numbers = message_cache[chat_id]['numbers']
+        
+        # Ask for country info
+        msg = bot.send_message(chat_id, "Now, please send the country information in the format:\nCountry Name|Country Code|Flag\n\nExample: United States|US|🇺🇸")
+        bot.register_next_step_handler(msg, lambda m: add_numbers_to_db(m, numbers, 'skip'))
+        
+        bot.answer_callback_query(call.id, "✅ Please enter country info")
+    except Exception as e:
+        logger.error(f"Error in process_numbers_with_skip: {e}")
+        bot.answer_callback_query(call.id, "❌ An error occurred!")
+
+def process_numbers_with_overwrite(call):
+    try:
+        chat_id = call.message.chat.id
+        
+        if chat_id not in message_cache or 'numbers' not in message_cache[chat_id]:
+            bot.answer_callback_query(call.id, "❌ No numbers found in cache!")
+            return
+        
+        numbers = message_cache[chat_id]['numbers']
+        
+        # Ask for country info
+        msg = bot.send_message(chat_id, "Now, please send the country information in the format:\nCountry Name|Country Code|Flag\n\nExample: United States|US|🇺🇸")
+        bot.register_next_step_handler(msg, lambda m: add_numbers_to_db(m, numbers, 'overwrite'))
+        
+        bot.answer_callback_query(call.id, "✅ Please enter country info")
+    except Exception as e:
+        logger.error(f"Error in process_numbers_with_overwrite: {e}")
+        bot.answer_callback_query(call.id, "❌ An error occurred!")
+
+def add_numbers_to_db(message, numbers, duplicate_handling):
     try:
         chat_id = message.chat.id
         
-        if chat_id not in message_cache:
-            bot.send_message(chat_id, "❌ Session expired. Please start again.")
+        if message.text == '/cancel':
+            bot.send_message(chat_id, "Process cancelled.")
+            show_admin_panel(chat_id)
             return
         
-        batch_name = message_cache[chat_id]['batch_name']
+        country_info = message.text.split('|')
+        if len(country_info) != 3:
+            bot.reply_to(message, "❌ Invalid format. Use: Country Name|Code|Flag\nExample: United States|US|🇺🇸")
+            return
         
-        bot.send_message(chat_id, f"⏳ Processing {len(numbers)} numbers...")
+        country_name, country_code, country_flag = country_info
         
-        added_count = 0
-        skipped_count = 0
+        # Get the batch name from cache
+        batch_name = message_cache[chat_id]['batch_name'] if chat_id in message_cache and 'batch_name' in message_cache[chat_id] else 'Default Batch'
         
-        # Auto-detect country from first valid number
-        sample_country_code = None
-        sample_flag = None
+        bot.reply_to(message, f"⏳ Processing {len(numbers)} numbers for {country_flag} {country_name}...")
+        
+        added = 0
+        skipped = 0
+        updated = 0
         
         for number in numbers:
             try:
                 # Get country info from number
-                flag, country_name = get_country_from_number(number)
-                country_code = None
+                flag, name = get_country_from_number(number)
                 
-                # Extract country code from flag if available
-                if flag and flag != '🌍':
-                    try:
-                        # Try to get country code from flag emoji
-                        for code in pycountry.countries:
-                            if get_flag_emoji(code.alpha_2) == flag:
-                                country_code = code.alpha_2
-                                break
-                    except:
-                        pass
+                # Use provided country info or auto-detected
+                final_country = country_name if country_name else name
+                final_code = country_code if country_code else 'Unknown'
+                final_flag = country_flag if country_flag else flag
                 
-                # If no country code detected, use first two letters of batch name
-                if not country_code:
-                    country_code = batch_name[:2].upper()
-                
-                if not sample_country_code:
-                    sample_country_code = country_code
-                    sample_flag = flag
-                
-                # Check if number already exists
+                # Check if number exists
                 existing = db.fetchone("SELECT id FROM numbers WHERE number = ?", (number,))
                 
                 if existing:
-                    skipped_count += 1
-                    continue
-                
-                # Add number to database
-                db.execute('''INSERT INTO numbers 
-                              (country, number, country_code, country_flag, batch_name)
-                              VALUES (?, ?, ?, ?, ?)''',
-                           (batch_name, number, country_code, flag, batch_name))
-                
-                added_count += 1
-                
-                # Update country stats
-                country = db.fetchone("SELECT * FROM countries WHERE code = ?", (country_code,))
-                if country:
-                    db.execute('''UPDATE countries SET total_numbers = total_numbers + 1 
-                                  WHERE code = ?''', (country_code,))
+                    if duplicate_handling == 'skip':
+                        skipped += 1
+                        continue
+                    elif duplicate_handling == 'overwrite':
+                        # Update existing number with batch name
+                        db.execute('''UPDATE numbers SET country = ?, country_code = ?, country_flag = ?, batch_name = ?
+                                      WHERE number = ?''',
+                                   (final_country, final_code, final_flag, batch_name, number))
+                        updated += 1
                 else:
-                    db.execute('''INSERT INTO countries (name, code, flag, total_numbers)
-                                  VALUES (?, ?, ?, ?)''',
-                               (batch_name, country_code, flag, 1))
-                
+                    # Add new number with batch name
+                    db.execute('''INSERT INTO numbers (country, number, country_code, country_flag, batch_name)
+                                  VALUES (?, ?, ?, ?, ?)''',
+                               (final_country, number, final_code, final_flag, batch_name))
+                    added += 1
+                    
             except Exception as e:
                 logger.error(f"Error processing number {number}: {e}")
-                skipped_count += 1
+                skipped += 1
+        
+        # Update country stats
+        country = db.fetchone("SELECT * FROM countries WHERE code = ?", (country_code,))
+        if country:
+            db.execute('''UPDATE countries SET total_numbers = total_numbers + ? 
+                          WHERE code = ?''', (added, country_code))
+        else:
+            db.execute('''INSERT INTO countries (name, code, flag, total_numbers)
+                          VALUES (?, ?, ?, ?)''',
+                       (country_name, country_code, country_flag, added))
         
         # Clear cache
         if chat_id in message_cache:
             del message_cache[chat_id]
         
-        # Notify users
+        # Notify all users
         users = db.fetchall("SELECT user_id FROM users WHERE is_banned = 0")
         notified = 0
         
         for user in users:
             try:
                 bot.send_message(user['user_id'], 
-                                f"🆕 New numbers added: {batch_name}!\n\n"
-                                f"Total: {added_count} new numbers\n"
-                                f"Use '📇 Get Number' to get one.")
+                                f"🆕 New numbers added for {country_flag} {country_name}! Use '📇 Get Number' to get one.")
                 notified += 1
                 time.sleep(0.1)
             except:
                 continue
         
-        result_msg = f"✅ Numbers added successfully!\n\n"
+        result_msg = f"✅ Numbers added for {country_flag} {country_name}!\n\n"
         result_msg += f"Batch Name: {batch_name}\n"
-        result_msg += f"Total numbers in file: {len(numbers)}\n"
-        result_msg += f"Added to database: {added_count}\n"
-        result_msg += f"Skipped (duplicates): {skipped_count}\n"
-        result_msg += f"Notified users: {notified}"
+        result_msg += f"Added: {added}\n"
+        if duplicate_handling == 'skip':
+            result_msg += f"Skipped (duplicates): {skipped}\n"
+        else:
+            result_msg += f"Updated: {updated}\n"
+            result_msg += f"Failed: {skipped}\n"
+        result_msg += f"Notified {notified} users."
         
         bot.send_message(chat_id, result_msg)
         
     except Exception as e:
-        logger.error(f"Error in process_all_numbers: {e}")
-        bot.send_message(message.chat.id, f"❌ Error: {str(e)}")
+        logger.error(f"Error in add_numbers_to_db: {e}")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
 
 def show_number_stats(chat_id):
     try:
@@ -2634,6 +2806,343 @@ def export_stats(chat_id):
         logger.error(f"Error in export_stats: {e}")
         bot.send_message(chat_id, "❌ Error exporting stats")
 
+# New functions for resetting assignments by country
+def show_reset_country_selection(chat_id):
+    """Show list of countries to reset assignments for"""
+    try:
+        # Get countries with active assignments
+        countries = db.fetchall('''SELECT DISTINCT n.country_code, c.name, c.flag, 
+                                          COUNT(na.id) as active_count
+                                   FROM number_assignments na
+                                   JOIN numbers n ON na.number = n.number
+                                   JOIN countries c ON n.country_code = c.code
+                                   WHERE na.is_active = 1
+                                   GROUP BY n.country_code, c.name, c.flag
+                                   HAVING active_count > 0
+                                   ORDER BY c.name''')
+        
+        if not countries:
+            bot.send_message(chat_id, "✅ No active assignments found in any country.")
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        
+        for country in countries:
+            btn_text = f"{country['flag']} {country['name']} ({country['active_count']})"
+            btn = types.InlineKeyboardButton(btn_text, callback_data=f"reset_country_{country['country_code']}")
+            markup.add(btn)
+        
+        back_btn = types.InlineKeyboardButton("⬅️ Back", callback_data="admin_reset")
+        markup.row(back_btn)
+        
+        bot.send_message(chat_id, "🌍 Select a country to reset ALL assignments:\n\n" +
+                         "⚠️ This will deactivate ALL active number assignments for the selected country.", 
+                         reply_markup=markup)
+    except Exception as e:
+        logger.error(f"Error in show_reset_country_selection: {e}")
+        bot.send_message(chat_id, "❌ Error loading country list.")
+
+def show_reset_country_confirmation(call, country_code):
+    """Show confirmation for resetting assignments in a country"""
+    try:
+        # Get country info
+        country = db.fetchone('''SELECT c.name, c.flag, COUNT(na.id) as active_count
+                                 FROM countries c
+                                 JOIN numbers n ON c.code = n.country_code
+                                 JOIN number_assignments na ON n.number = na.number
+                                 WHERE c.code = ? AND na.is_active = 1''', (country_code,))
+        
+        if not country or country['active_count'] == 0:
+            bot.answer_callback_query(call.id, "❌ No active assignments found for this country!")
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        confirm_btn = types.InlineKeyboardButton("✅ Yes, Reset All", callback_data=f"confirm_reset_country_{country_code}")
+        cancel_btn = types.InlineKeyboardButton("❌ Cancel", callback_data="admin_reset")
+        markup.add(confirm_btn, cancel_btn)
+        
+        msg = f"⚠️ **CONFIRM RESET**\n\n"
+        msg += f"Country: {country['flag']} {country['name']}\n"
+        msg += f"Active Assignments: {country['active_count']}\n\n"
+        msg += "This will:\n"
+        msg += "1. Deactivate ALL active assignments for this country\n"
+        msg += "2. Mark all numbers as available again\n"
+        msg += "3. Notify affected users\n\n"
+        msg += "**This action cannot be undone!**"
+        
+        bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, 
+                              reply_markup=markup, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in show_reset_country_confirmation: {e}")
+        bot.answer_callback_query(call.id, "❌ Error loading confirmation!")
+
+def reset_all_assignments_for_country(call, country_code):
+    """Reset all assignments for a specific country"""
+    try:
+        # Get country info and affected assignments
+        country = db.fetchone("SELECT name, flag FROM countries WHERE code = ?", (country_code,))
+        if not country:
+            bot.answer_callback_query(call.id, "❌ Country not found!")
+            return
+        
+        # Get all active assignments for this country
+        assignments = db.fetchall('''SELECT na.number, na.user_id, u.username
+                                     FROM number_assignments na
+                                     JOIN numbers n ON na.number = n.number
+                                     LEFT JOIN users u ON na.user_id = u.user_id
+                                     WHERE n.country_code = ? AND na.is_active = 1''', (country_code,))
+        
+        if not assignments:
+            bot.answer_callback_query(call.id, "❌ No assignments found!")
+            return
+        
+        reset_count = 0
+        notified_users = set()
+        
+        for assignment in assignments:
+            try:
+                # Deactivate the assignment
+                db.execute("UPDATE number_assignments SET is_active = 0 WHERE number = ?", 
+                           (assignment['number'],))
+                
+                # Mark number as available again
+                db.execute("UPDATE numbers SET is_used = 0, used_by = NULL, use_date = NULL WHERE number = ?", 
+                           (assignment['number'],))
+                
+                reset_count += 1
+                
+                # Notify user (only once per user)
+                if assignment['user_id'] not in notified_users:
+                    try:
+                        user_msg = f"📢 **Important Notice**\n\n"
+                        user_msg += f"Your number assignments for {country['flag']} {country['name']} "
+                        user_msg += "have been reset by admin.\n\n"
+                        user_msg += "You can get new numbers from the '📇 Get Number' menu."
+                        bot.send_message(assignment['user_id'], user_msg, parse_mode='Markdown')
+                        notified_users.add(assignment['user_id'])
+                    except Exception as e:
+                        logger.error(f"Could not notify user {assignment['user_id']}: {e}")
+                        
+            except Exception as e:
+                logger.error(f"Error resetting number {assignment.get('number')}: {e}")
+        
+        # Update country stats
+        db.execute('''UPDATE countries SET used_numbers = used_numbers - ? 
+                      WHERE code = ?''', (reset_count, country_code))
+        
+        # Send confirmation
+        success_msg = f"✅ **Reset Complete**\n\n"
+        success_msg += f"Country: {country['flag']} {country['name']}\n"
+        success_msg += f"Assignments Reset: {reset_count}\n"
+        success_msg += f"Users Notified: {len(notified_users)}\n\n"
+        success_msg += "All numbers are now available for new assignments."
+        
+        bot.edit_message_text(success_msg, call.message.chat.id, call.message.message_id, 
+                              parse_mode='Markdown')
+        
+        bot.answer_callback_query(call.id, f"✅ Reset {reset_count} assignments!")
+        
+    except Exception as e:
+        logger.error(f"Error in reset_all_assignments_for_country: {e}")
+        bot.answer_callback_query(call.id, "❌ Error resetting assignments!")
+
+def show_admin_reset_system(chat_id):
+    try:
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        
+        btn1 = types.InlineKeyboardButton("🗑️ Delete Used Numbers", callback_data="reset_delete_used")
+        btn2 = types.InlineKeyboardButton("🌍 Reset Country Assignments", callback_data="reset_all_assignments")
+        btn3 = types.InlineKeyboardButton("🔄 Reset All Assignments", callback_data="reset_all_assignments_global")
+        btn4 = types.InlineKeyboardButton("🧹 Clean OTP Messages", callback_data="reset_clean_otp")
+        btn5 = types.InlineKeyboardButton("📊 Fix Stats Count", callback_data="reset_fix_stats")
+        
+        markup.add(btn1, btn2, btn3, btn4, btn5)
+        
+        back_btn = types.InlineKeyboardButton("⬅️ Back", callback_data="admin_panel")
+        markup.row(back_btn)
+        
+        msg = """🗑️ Reset System
+        
+⚠️ WARNING: These actions are PERMANENT and cannot be undone!
+
+Options:
+1. 🗑️ Delete Used Numbers - Permanently delete all used numbers
+2. 🌍 Reset Country Assignments - Deactivate assignments for a specific country
+3. 🔄 Reset All Assignments - Deactivate ALL active assignments globally
+4. 🧹 Clean OTP Messages - Delete old OTP messages
+5. 📊 Fix Stats Count - Fix incorrect statistics"""
+        
+        bot.send_message(chat_id, msg, reply_markup=markup)
+    except Exception as e:
+        logger.error(f"Error in show_admin_reset_system: {e}")
+
+def reset_delete_used_numbers(chat_id):
+    try:
+        # Get count of used numbers
+        used_count = db.fetchone("SELECT COUNT(*) as count FROM numbers WHERE is_used = 1")
+        count = used_count['count'] if used_count else 0
+        
+        if count == 0:
+            bot.send_message(chat_id, "✅ No used numbers found to delete.")
+            return
+        
+        # Ask for confirmation
+        markup = types.InlineKeyboardMarkup()
+        confirm_btn = types.InlineKeyboardButton("✅ Confirm Delete", callback_data="reset_confirm_delete_used")
+        cancel_btn = types.InlineKeyboardButton("❌ Cancel", callback_data="admin_reset")
+        markup.add(confirm_btn, cancel_btn)
+        
+        bot.send_message(chat_id, f"⚠️ Are you sure you want to PERMANENTLY delete {count} used numbers?\n\nThis action cannot be undone!", reply_markup=markup)
+    except Exception as e:
+        logger.error(f"Error in reset_delete_used_numbers: {e}")
+
+def reset_confirm_delete_used(call):
+    try:
+        if not is_admin(call.from_user.id):
+            bot.answer_callback_query(call.id, "❌ Access denied!")
+            return
+        
+        # Get used numbers
+        used_numbers = db.fetchall("SELECT number, country_code FROM numbers WHERE is_used = 1")
+        
+        if not used_numbers:
+            bot.answer_callback_query(call.id, "✅ No used numbers found!")
+            return
+        
+        deleted_count = 0
+        
+        for num in used_numbers:
+            try:
+                # Delete from all tables
+                db.execute("DELETE FROM numbers WHERE number = ?", (num['number'],))
+                db.execute("DELETE FROM number_assignments WHERE number = ?", (num['number'],))
+                db.execute("DELETE FROM otp_messages WHERE number = ?", (num['number'],))
+                db.execute("DELETE FROM message_tracking WHERE number = ?", (num['number'],))
+                
+                # Add to reset history
+                reset_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                db.execute('''INSERT INTO reset_history (number, country_code, reset_date, reset_type)
+                              VALUES (?, ?, ?, ?)''',
+                           (num['number'], num['country_code'], reset_date, 'admin'))
+                
+                # Update country stats
+                if num['country_code']:
+                    db.execute('''UPDATE countries 
+                                  SET total_numbers = total_numbers - 1, 
+                                      used_numbers = used_numbers - 1 
+                                  WHERE code = ?''', (num['country_code'],))
+                
+                deleted_count += 1
+            except Exception as e:
+                logger.error(f"Error deleting number {num['number']}: {e}")
+        
+        # Send confirmation
+        bot.edit_message_text(f"✅ Successfully deleted {deleted_count} used numbers permanently!\n\nThese numbers will never be assigned to anyone again.",
+                             call.message.chat.id, call.message.message_id)
+        
+        bot.answer_callback_query(call.id, "✅ Deleted used numbers!")
+    except Exception as e:
+        logger.error(f"Error in reset_confirm_delete_used: {e}")
+        bot.answer_callback_query(call.id, "❌ Error deleting numbers!")
+
+def generate_numbers_report(chat_id):
+    try:
+        bot.send_message(chat_id, "📊 Generating numbers report...")
+        
+        # Get all numbers with their assignments and OTP counts
+        numbers = db.fetchall('''SELECT 
+                                    n.number,
+                                    n.country,
+                                    n.country_code,
+                                    n.country_flag,
+                                    n.is_used,
+                                    n.batch_name,
+                                    n.use_date,
+                                    u.username as used_by_username,
+                                    u.user_id as used_by_id,
+                                    na.otp_count,
+                                    na.total_revenue,
+                                    na.assigned_date,
+                                    na.last_otp_date
+                                 FROM numbers n
+                                 LEFT JOIN users u ON n.used_by = u.user_id
+                                 LEFT JOIN number_assignments na ON n.number = na.number AND na.is_active = 1
+                                 ORDER BY n.country, n.number''')
+        
+        if not numbers:
+            bot.send_message(chat_id, "❌ No numbers found in database.")
+            return
+        
+        # Create TXT file content
+        import io
+        output = io.StringIO()
+        
+        output.write("=" * 80 + "\n")
+        output.write("NUMBERS REPORT\n")
+        output.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        output.write("=" * 80 + "\n\n")
+        
+        output.write(f"Total Numbers: {len(numbers)}\n")
+        
+        # Group by country
+        countries = {}
+        for num in numbers:
+            country = num['country'] or 'Unknown'
+            if country not in countries:
+                countries[country] = []
+            countries[country].append(num)
+        
+        for country, nums in countries.items():
+            output.write(f"\n{'='*60}\n")
+            output.write(f"COUNTRY: {country}\n")
+            output.write(f"{'='*60}\n\n")
+            
+            for i, num in enumerate(nums, 1):
+                output.write(f"[{i}] {num['country_flag']} {num['number']}\n")
+                output.write(f"    Status: {'✅ Used' if num['is_used'] == 1 else '🟢 Available'}\n")
+                
+                if num['is_used'] == 1:
+                    output.write(f"    Used By: @{num['used_by_username'] or 'N/A'} (ID: {num['used_by_id'] or 'N/A'})\n")
+                    output.write(f"    Use Date: {num['use_date'] or 'N/A'}\n")
+                
+                if num['otp_count']:
+                    output.write(f"    OTPs Received: {num['otp_count']}\n")
+                    output.write(f"    Revenue: ${num['total_revenue'] or 0:.3f}\n")
+                    output.write(f"    Last OTP: {num['last_otp_date'] or 'N/A'}\n")
+                
+                if num['batch_name']:
+                    output.write(f"    Batch: {num['batch_name']}\n")
+                
+                output.write(f"    Assigned Date: {num['assigned_date'] or 'N/A'}\n")
+                output.write("\n")
+        
+        # Add summary
+        output.write("\n" + "="*80 + "\n")
+        output.write("SUMMARY\n")
+        output.write("="*80 + "\n\n")
+        
+        total_used = sum(1 for n in numbers if n['is_used'] == 1)
+        total_available = len(numbers) - total_used
+        total_otps = sum(n['otp_count'] or 0 for n in numbers)
+        total_revenue = sum(n['total_revenue'] or 0 for n in numbers)
+        
+        output.write(f"Total Numbers: {len(numbers)}\n")
+        output.write(f"Used Numbers: {total_used}\n")
+        output.write(f"Available Numbers: {total_available}\n")
+        output.write(f"Total OTPs Received: {total_otps}\n")
+        output.write(f"Total Revenue Generated: ${total_revenue:.3f}\n")
+        output.write(f"Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        
+        # Save to file and send
+        filename = f"numbers_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        bot.send_document(chat_id, (filename, output.getvalue()))
+        output.close()
+        
+        bot.send_message(chat_id, "✅ Numbers report generated successfully!")
+    except Exception as e:
+        logger.error(f"Error in generate_numbers_report: {e}")
+        bot.send_message(chat_id, "❌ Error generating report!")
+
 # Enhanced Group message monitoring - detects all messages including from other bots
 @bot.message_handler(func=lambda message: message.chat.id == MONITORED_GROUP_ID)
 def handle_group_message(message):
@@ -2757,271 +3266,6 @@ def handle_group_message(message):
         logger.error(f"Error processing group message: {e}")
         logger.error(traceback.format_exc())
 
-# Admin Reset System Functions
-def show_admin_reset_system(chat_id):
-    try:
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        
-        btn1 = types.InlineKeyboardButton("🗑️ Delete Used Numbers", callback_data="reset_delete_used")
-        btn2 = types.InlineKeyboardButton("🔄 Reset All Assignments", callback_data="reset_all_assignments")
-        btn3 = types.InlineKeyboardButton("🧹 Clean OTP Messages", callback_data="reset_clean_otp")
-        btn4 = types.InlineKeyboardButton("📊 Fix Stats Count", callback_data="reset_fix_stats")
-        
-        markup.add(btn1, btn2, btn3, btn4)
-        
-        back_btn = types.InlineKeyboardButton("⬅️ Back", callback_data="admin_panel")
-        markup.row(back_btn)
-        
-        msg = """🗑️ Reset System
-
-⚠️ WARNING: These actions are PERMANENT and cannot be undone!
-
-Options:
-1. 🗑️ Delete Used Numbers - Permanently delete all used numbers
-2. 🔄 Reset All Assignments - Deactivate all active assignments
-3. 🧹 Clean OTP Messages - Delete old OTP messages
-4. 📊 Fix Stats Count - Fix incorrect statistics"""
-        
-        bot.send_message(chat_id, msg, reply_markup=markup)
-    except Exception as e:
-        logger.error(f"Error in show_admin_reset_system: {e}")
-
-def show_reset_all_assignments(chat_id):
-    """Show list of countries with active assignments for reset"""
-    try:
-        # Get countries with active assignments
-        countries = db.fetchall('''SELECT DISTINCT c.name, c.code, c.flag 
-                                   FROM countries c
-                                   JOIN numbers n ON c.code = n.country_code
-                                   JOIN number_assignments na ON n.number = na.number
-                                   WHERE na.is_active = 1
-                                   ORDER BY c.name''')
-        
-        if not countries:
-            bot.send_message(chat_id, "✅ No active assignments found.")
-            return
-        
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        
-        for country in countries:
-            btn = types.InlineKeyboardButton(
-                f"{country['flag']} {country['name']}",
-                callback_data=f"reset_country_{country['code']}"
-            )
-            markup.add(btn)
-        
-        back_btn = types.InlineKeyboardButton("⬅️ Back", callback_data="admin_reset")
-        markup.row(back_btn)
-        
-        bot.send_message(chat_id, "🌍 Select a country to reset all assignments:", reply_markup=markup)
-    except Exception as e:
-        logger.error(f"Error in show_reset_all_assignments: {e}")
-        bot.send_message(chat_id, "❌ An error occurred!")
-
-def confirm_reset_assignments(call, country_code):
-    """Confirm reset of all assignments for a country"""
-    try:
-        if not is_admin(call.from_user.id):
-            bot.answer_callback_query(call.id, "❌ Access denied!")
-            return
-        
-        # Get country info
-        country = db.fetchone("SELECT name, flag FROM countries WHERE code = ?", (country_code,))
-        if not country:
-            bot.answer_callback_query(call.id, "❌ Country not found!")
-            return
-        
-        # Get count of active assignments
-        count_result = db.fetchone('''SELECT COUNT(*) as count 
-                                      FROM number_assignments na
-                                      JOIN numbers n ON na.number = n.number
-                                      WHERE n.country_code = ? AND na.is_active = 1''', (country_code,))
-        
-        count = count_result['count'] if count_result else 0
-        
-        if count == 0:
-            bot.answer_callback_query(call.id, f"✅ No active assignments for {country['name']}!")
-            return
-        
-        markup = types.InlineKeyboardMarkup()
-        confirm_btn = types.InlineKeyboardButton("✅ Confirm Reset", callback_data=f"confirm_reset_{country_code}")
-        cancel_btn = types.InlineKeyboardButton("❌ Cancel", callback_data="admin_reset")
-        markup.add(confirm_btn, cancel_btn)
-        
-        bot.edit_message_text(
-            f"⚠️ Are you sure you want to reset ALL assignments for {country['flag']} {country['name']}?\n\n"
-            f"This will affect {count} active assignments.\n"
-            f"All users will lose their assigned numbers for this country.",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=markup
-        )
-        
-        bot.answer_callback_query(call.id, "Please confirm reset")
-    except Exception as e:
-        logger.error(f"Error in confirm_reset_assignments: {e}")
-        bot.answer_callback_query(call.id, "❌ An error occurred!")
-
-def reset_assignments_for_country(call, country_code):
-    """Reset all assignments for a specific country"""
-    try:
-        if not is_admin(call.from_user.id):
-            bot.answer_callback_query(call.id, "❌ Access denied!")
-            return
-        
-        # Get country info
-        country = db.fetchone("SELECT name, flag FROM countries WHERE code = ?", (country_code,))
-        if not country:
-            bot.answer_callback_query(call.id, "❌ Country not found!")
-            return
-        
-        # Get all active assignments for this country
-        assignments = db.fetchall('''SELECT na.number, na.user_id 
-                                     FROM number_assignments na
-                                     JOIN numbers n ON na.number = n.number
-                                     WHERE n.country_code = ? AND na.is_active = 1''', (country_code,))
-        
-        reset_count = 0
-        
-        for assignment in assignments:
-            try:
-                # Deactivate assignment
-                db.execute("UPDATE number_assignments SET is_active = 0 WHERE number = ? AND user_id = ?",
-                          (assignment['number'], assignment['user_id']))
-                
-                # Mark number as unused
-                db.execute("UPDATE numbers SET is_used = 0, used_by = NULL, use_date = NULL WHERE number = ?",
-                          (assignment['number'],))
-                
-                reset_count += 1
-                
-                # Notify user
-                try:
-                    user_msg = f"ℹ️ Your number {assignment['number']} has been reset by admin.\n\n"
-                    user_msg += f"Country: {country['flag']} {country['name']}\n"
-                    user_msg += "You can now get a new number from the '📇 Get Number' menu."
-                    bot.send_message(assignment['user_id'], user_msg)
-                except:
-                    pass
-                
-            except Exception as e:
-                logger.error(f"Error resetting assignment {assignment['number']}: {e}")
-        
-        # Update country stats
-        db.execute('''UPDATE countries SET used_numbers = used_numbers - ? 
-                      WHERE code = ?''', (reset_count, country_code))
-        
-        # Send confirmation
-        bot.edit_message_text(
-            f"✅ Successfully reset {reset_count} assignments for {country['flag']} {country['name']}!\n\n"
-            f"All numbers from this country are now available again.",
-            call.message.chat.id,
-            call.message.message_id
-        )
-        
-        bot.answer_callback_query(call.id, "✅ Assignments reset successfully!")
-    except Exception as e:
-        logger.error(f"Error in reset_assignments_for_country: {e}")
-        bot.answer_callback_query(call.id, "❌ Error resetting assignments!")
-
-def generate_numbers_report(chat_id):
-    try:
-        bot.send_message(chat_id, "📊 Generating numbers report...")
-        
-        # Get all numbers with their assignments and OTP counts
-        numbers = db.fetchall('''SELECT 
-                                    n.number,
-                                    n.country,
-                                    n.country_code,
-                                    n.country_flag,
-                                    n.is_used,
-                                    n.batch_name,
-                                    n.use_date,
-                                    u.username as used_by_username,
-                                    u.user_id as used_by_id,
-                                    na.otp_count,
-                                    na.total_revenue,
-                                    na.assigned_date,
-                                    na.last_otp_date
-                                 FROM numbers n
-                                 LEFT JOIN users u ON n.used_by = u.user_id
-                                 LEFT JOIN number_assignments na ON n.number = na.number AND na.is_active = 1
-                                 ORDER BY n.country, n.number''')
-        
-        if not numbers:
-            bot.send_message(chat_id, "❌ No numbers found in database.")
-            return
-        
-        # Create TXT file content
-        import io
-        output = io.StringIO()
-        
-        output.write("=" * 80 + "\n")
-        output.write("NUMBERS REPORT\n")
-        output.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        output.write("=" * 80 + "\n\n")
-        
-        output.write(f"Total Numbers: {len(numbers)}\n")
-        
-        # Group by country
-        countries = {}
-        for num in numbers:
-            country = num['country'] or 'Unknown'
-            if country not in countries:
-                countries[country] = []
-            countries[country].append(num)
-        
-        for country, nums in countries.items():
-            output.write(f"\n{'='*60}\n")
-            output.write(f"COUNTRY: {country}\n")
-            output.write(f"{'='*60}\n\n")
-            
-            for i, num in enumerate(nums, 1):
-                output.write(f"[{i}] {num['country_flag']} {num['number']}\n")
-                output.write(f"    Status: {'✅ Used' if num['is_used'] == 1 else '🟢 Available'}\n")
-                
-                if num['is_used'] == 1:
-                    output.write(f"    Used By: @{num['used_by_username'] or 'N/A'} (ID: {num['used_by_id'] or 'N/A'})\n")
-                    output.write(f"    Use Date: {num['use_date'] or 'N/A'}\n")
-                
-                if num['otp_count']:
-                    output.write(f"    OTPs Received: {num['otp_count']}\n")
-                    output.write(f"    Revenue: ${num['total_revenue'] or 0:.3f}\n")
-                    output.write(f"    Last OTP: {num['last_otp_date'] or 'N/A'}\n")
-                
-                if num['batch_name']:
-                    output.write(f"    Batch: {num['batch_name']}\n")
-                
-                output.write(f"    Assigned Date: {num['assigned_date'] or 'N/A'}\n")
-                output.write("\n")
-        
-        # Add summary
-        output.write("\n" + "="*80 + "\n")
-        output.write("SUMMARY\n")
-        output.write("="*80 + "\n\n")
-        
-        total_used = sum(1 for n in numbers if n['is_used'] == 1)
-        total_available = len(numbers) - total_used
-        total_otps = sum(n['otp_count'] or 0 for n in numbers)
-        total_revenue = sum(n['total_revenue'] or 0 for n in numbers)
-        
-        output.write(f"Total Numbers: {len(numbers)}\n")
-        output.write(f"Used Numbers: {total_used}\n")
-        output.write(f"Available Numbers: {total_available}\n")
-        output.write(f"Total OTPs Received: {total_otps}\n")
-        output.write(f"Total Revenue Generated: ${total_revenue:.3f}\n")
-        output.write(f"Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        
-        # Save to file and send
-        filename = f"numbers_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        bot.send_document(chat_id, (filename, output.getvalue()))
-        output.close()
-        
-        bot.send_message(chat_id, "✅ Numbers report generated successfully!")
-    except Exception as e:
-        logger.error(f"Error in generate_numbers_report: {e}")
-        bot.send_message(chat_id, "❌ Error generating report!")
-
 # Admin commands
 @bot.message_handler(commands=['panel'])
 def admin_panel_command(message):
@@ -3089,13 +3333,13 @@ def reset_assignments(message):
                 
                 # 2. Delete from number_assignments table
                 db.execute("DELETE FROM number_assignments WHERE number = ? AND user_id = ?",
-                          (assign['number'], user_id))
+                           (assign['number'], user_id))
                 
                 # 3. Add to reset history
                 reset_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 db.execute('''INSERT INTO reset_history (user_id, number, country_code, reset_date, reset_type)
                               VALUES (?, ?, ?, ?, ?)''',
-                          (user_id, assign['number'], assign['country_code'], reset_date, 'user'))
+                           (user_id, assign['number'], assign['country_code'], reset_date, 'user'))
                 
                 # 4. Update country stats - decrement BOTH total and used numbers
                 if assign['country_code']:
@@ -3293,18 +3537,18 @@ if __name__ == "__main__":
     print(f"📣 Withdrawal Log Channel: {WITHDRAW_LOG_CHANNEL}")
     print(f"🔗 OTP Group: {OTP_GROUP_LINK}")
     print("✅ All features enabled:")
-    print("   1. ✅ Simplified number addition process")
-    print("   2. ✅ Auto-detect country flag from numbers")
-    print("   3. ✅ Reset All Assignments function fixed")
-    print("   4. ✅ English language throughout")
+    print("   1. ✅ Permanent number deletion on /reset")
+    print("   2. ✅ Admin panel with reset system")
+    print("   3. ✅ Numbers report generator (TXT file)")
+    print("   4. ✅ Each number shows: Number + OTP count + User ID + DateTime")
+    print("   5. ✅ No duplicate number assignment")
+    print("   6. ✅ Accurate statistics")
+    print("   7. ✅ IMPROVED: Better number detection from files")
+    print("   8. ✅ NEW: Reset All Assignment Number feature with country selection")
     
-    while True:
-        try:
-            print(f"\n🚀 Attempting to start bot polling...")
-            bot.infinity_polling(timeout=60, long_polling_timeout=30)
-        except Exception as e:
-            logger.error(f"Bot crashed with error: {e}")
-            logger.error(traceback.format_exc())
-            print(f"❌ Bot crashed: {e}")
-            print("🔄 Restarting in 10 seconds...")
-            time.sleep(10)
+    try:
+        bot.infinity_polling(timeout=60, long_polling_timeout=30)
+    except Exception as e:
+        logger.error(f"Bot error: {e}")
+        time.sleep(5)
+        bot.infinity_polling(timeout=60, long_polling_timeout=30)
