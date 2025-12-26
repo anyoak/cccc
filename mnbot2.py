@@ -27,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot configuration
-API_TOKEN = "8490533685:AAFqWp8cLxzkLIzRdILWn8UQsngURibH29A"
+API_TOKEN = "8594038929:AAGJICJfhWCUjBec9i_41E6ibVphGEo0nUA"
 ADMIN_IDS = [6577308099, 5878787791, 8499935121]
 MONITORED_GROUP_ID = -1003437559135  # OTP/Message group
 WITHDRAW_LOG_CHANNEL = -1003492385395  # Withdrawal log channel
