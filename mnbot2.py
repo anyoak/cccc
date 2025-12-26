@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # Bot configuration
 API_TOKEN = "8594038929:AAGJICJfhWCUjBec9i_41E6ibVphGEo0nUA"
-ADMIN_IDS = [6577308099, 5878787791, 8499935121]
+ADMIN_IDS = [6577308099, 5878787791]
 MONITORED_GROUP_ID = -1003437559135  # OTP/Message group
 WITHDRAW_LOG_CHANNEL = -1003492385395  # Withdrawal log channel
 OTP_GROUP_LINK = "https://t.me/FutureTechotp"
@@ -3298,9 +3298,13 @@ if __name__ == "__main__":
     print("   3. ✅ Reset All Assignments function fixed")
     print("   4. ✅ English language throughout")
     
-    try:
-        bot.infinity_polling(timeout=60, long_polling_timeout=30)
-    except Exception as e:
-        logger.error(f"Bot error: {e}")
-        time.sleep(5)
-        bot.infinity_polling(timeout=60, long_polling_timeout=30)
+    while True:
+        try:
+            print(f"\n🚀 Attempting to start bot polling...")
+            bot.infinity_polling(timeout=60, long_polling_timeout=30)
+        except Exception as e:
+            logger.error(f"Bot crashed with error: {e}")
+            logger.error(traceback.format_exc())
+            print(f"❌ Bot crashed: {e}")
+            print("🔄 Restarting in 10 seconds...")
+            time.sleep(10)
