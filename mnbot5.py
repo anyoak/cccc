@@ -27,11 +27,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot configuration
-API_TOKEN = "8490533685:AAFqWp8cLxzkLIzRdILWn8UQsngURibH29A"
-ADMIN_IDS = [6577308099, 5878787791, 8499935121]
-MONITORED_GROUP_ID = -1003437559135  # OTP/Message group
-WITHDRAW_LOG_CHANNEL = -1003492385395  # Withdrawal log channel
-OTP_GROUP_LINK = "https://t.me/FutureTechotp"
+API_TOKEN = "8501938750:AAFhwgXR5MTTk4yXk55zRSrGRU9lfDSFp7w"
+ADMIN_IDS = [6577308099, 5878787791, 5479383315]
+MONITORED_GROUP_ID = -1003389226158  # OTP/Message group
+WITHDRAW_LOG_CHANNEL = -1003389226158  # Withdrawal log channel
+OTP_GROUP_LINK = "https://t.me/BTLotpgrp"
 
 bot = telebot.TeleBot(API_TOKEN, threaded=True, num_threads=20)
 
@@ -684,14 +684,14 @@ def send_welcome(message):
         elif start_msg and start_msg_type == 'document':
             bot.send_document(message.chat.id, start_msg, caption="Welcome!")
         else:
-            welcome_msg = """🤖 Welcome to FutureTech Bot!
+            welcome_msg = """🤖 Welcome to BTL Bot!
 
 💰 Earn money by receiving SMS/OTP
 🌍 Numbers from multiple countries
 ⚡ Fast and reliable service
 
-~ Main Channel: @FutureTech30
-~ Public Otp Group: @FutureTechotp
+~ Main Channel: @wpsheet
+~ Public Otp Group: @BTLotpgrp
 
 Use the buttons below to navigate:"""
             bot.send_message(message.chat.id, welcome_msg)
